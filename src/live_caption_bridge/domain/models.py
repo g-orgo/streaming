@@ -18,11 +18,11 @@ class AudioChunk:
     ended_ns: int
 
 @dataclass(frozen=True, slots=True)
-    class Transcript:
-        """Represents a transcript of audio data."""
-        source: AudioSource
-        text: str
-        language: str
-        started_ns: int
-        ended_ns: int
-        confidence: float | None = None
+class Transcript:
+    """Represents a transcript of audio data."""
+    source: AudioSource
+    text: str
+    language: str
+    started_ns: int
+    ended_ns: int
+    confidence: float | None = None
