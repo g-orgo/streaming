@@ -26,3 +26,15 @@ class Transcript:
     started_ns: int
     ended_ns: int
     confidence: float | None = None
+    
+
+@dataclass(frozen=True, slots=True)
+class Caption:
+    original: str
+    translated: str
+    source_lang: str
+    target_lang: str
+    started_ns: int
+    ended_ns: int
+    
+    

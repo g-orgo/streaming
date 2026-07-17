@@ -813,8 +813,8 @@ Path: src/live_caption_bridge/domain/models.py
 class Caption:
     original: str
     translated: str
-    source_language: str
-    target_language: str
+    source_lang: str
+    target_lang: str
     started_ns: int
     ended_ns: int
 ~~~
@@ -830,15 +830,15 @@ def test_caption_separates_original_from_translation() -> None:
     c = Caption(
         original="Olá mundo",
         translated="Hello world",
-        source_language="pt",
-        target_language="en",
+        source_lang="pt",
+        target_lang="en",
         started_ns=10,
         ended_ns=110,
     )
     assert c.original == "Olá mundo"
     assert c.translated == "Hello world"
-    assert c.source_language == "pt"
-    assert c.target_language == "en"
+    assert c.source_lang == "pt"
+    assert c.target_lang == "en"
 ~~~
 
 Valide o arquivo completo:
@@ -904,8 +904,8 @@ def test_fake_sink_receives_caption() -> None:
     caption = Caption(
         original="Olá",
         translated="Hello",
-        source_language="pt",
-        target_language="en",
+        source_lang="pt",
+        target_lang="en",
         started_ns=0,
         ended_ns=100,
     )
@@ -999,8 +999,8 @@ def test_overlay_displays_caption(qtbot) -> None:
     caption = Caption(
         original="Olá",
         translated="Hello",
-        source_language="pt",
-        target_language="en",
+        source_lang="pt",
+        target_lang="en",
         started_ns=0,
         ended_ns=100,
     )
@@ -1664,8 +1664,8 @@ Nao aceite explicacoes livres do modelo. Exija JSON validado:
 ```json
 {
   "translation": "texto traduzido",
-  "source_language": "en",
-  "target_language": "pt-BR",
+  "source_lang": "en",
+  "target_lang": "pt-BR",
   "uncertain": false
 }
 ```
@@ -1798,8 +1798,8 @@ CREATE TABLE captions (
     source TEXT NOT NULL,
     original TEXT NOT NULL,
     translated TEXT NOT NULL,
-    source_language TEXT NOT NULL,
-    target_language TEXT NOT NULL,
+    source_lang TEXT NOT NULL,
+    target_lang TEXT NOT NULL,
     started_utc TEXT NOT NULL,
     ended_utc TEXT NOT NULL
 );
