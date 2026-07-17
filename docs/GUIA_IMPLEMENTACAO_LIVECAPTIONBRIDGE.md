@@ -975,7 +975,14 @@ python -m pytest tests/integration -q
 ~~~
 
 Depois de o placeholder aparecer, substitua a string fixa por um método que recebe uma
-Caption do sink. Adicione ao Overlay:
+Caption do sink. Adicione o import no topo do arquivo:
+
+Path: src/live_caption_bridge/ui/overlay.py
+~~~python
+from live_caption_bridge.domain.models import Caption
+~~~
+
+Depois adicione o método à classe Overlay:
 
 Path: src/live_caption_bridge/ui/overlay.py
 ~~~python
@@ -1013,14 +1020,58 @@ def test_overlay_displays_caption(qtbot) -> None:
 python -m pytest tests -q
 ~~~
 
-Quando isso passar, habilite translucidez, sempre-no-topo e click-through, uma flag
+### M01.7 Execução manual do overlay
+
+Com o widget criado e testado, adicione um ponto de entrada para ver a janela fora dos
+testes. Abra `src/live_caption_bridge/ui/overlay.py` e acrescente no final:
+
+Path: src/live_caption_bridge/ui/overlay.py
+~~~python
+import sys
+
+from PySide6.QtWidgets import QApplication
+
+
+def main() -> None:
+    app = QApplication(sys.argv)
+    overlay = Overlay()
+    overlay.show()
+    caption = Caption(
+        original="Olá mundo",
+        translated="Hello world",
+        source_lang="pt",
+        target_lang="en",
+        started_ns=0,
+        ended_ns=100,
+    )
+    overlay.display_caption(caption)
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
+~~~
+
+`main()` cria um `QApplication`, instancia o Overlay e chama `show()` — sem isso a
+janela nunca aparece. O `if __name__ == "__main__"` permite executar diretamente:
+
+~~~powershell
+python -m live_caption_bridge.ui.overlay
+~~~
+
+Uma janela frameless, translúcida e sempre-no-topo deve aparecer com "Hello world".
+Feche com Alt+F4 ou pelo console. Se nada aparecer, confirme que PySide6 está
+instalado e que o ambiente `.venv` está ativo.
+
+Quando isso funcionar, habilite translucidez, sempre-no-topo e click-through, uma flag
 por vez. Cada flag muda o comportamento do Windows e pode afetar DPI, foco e
 fechamento; por isso a validação deve ocorrer imediatamente, sem sleep e sem workers
 dentro do widget.
 
 **Checkpoint M01.** O domínio passa sem importar Qt, o teste de UI fecha a janela de
-forma determinística e uma execução manual exibe uma legenda. Registre a evidência em
-**docs/lab/M01-dominio-overlay.md** antes de iniciar o áudio.
+forma determinística e `python -m live_caption_bridge.ui.overlay` exibe uma legenda na
+tela. Registre a evidência em **docs/lab/M01-dominio-overlay.md** antes de iniciar o
+áudio.
 
 Leitura: [dataclasses](https://docs.python.org/3/library/dataclasses.html),
 [Protocol](https://docs.python.org/3/library/typing.html#typing.Protocol),
