@@ -273,7 +273,7 @@ New-Item -ItemType Directory -Force -Path .\src\live_caption_bridge
 Ela recebera o codigo Python. Depois crie a pasta de testes unitarios:
 
 ```powershell
-New-Item -ItemType Directory -Force -Path .\tests\unit
+New-Item -ItemType Directory -Force -Path .\tests
 ```
 
 Ela ficara isolada de audio, tela e rede. Por fim, crie o lugar do registro do marco:
@@ -462,15 +462,15 @@ Ela habilita `python -m live_caption_bridge` sem duplicar a inicializacao.
 
 #### Passo 5 - Crie um teste antes de adicionar comportamento
 
-Crie somente `tests/unit/test_main.py`:
+Crie somente `tests/test_main.py`:
 
 ```powershell
-New-Item -ItemType File -Force -Path .\tests\unit\test_main.py
+New-Item -ItemType File -Force -Path .\tests\test_main.py
 ```
 
 Adicione o teste:
 
-Path: tests/unit/test_main.py
+Path: tests/test_main.py
 ```python
 import logging
 
@@ -568,39 +568,40 @@ StreamingProject/
     troubleshooting.md
     adr/
     lab/
-  src/live_caption_bridge/
-    __init__.py
-    __main__.py
-    main.py
-    domain/
-      models.py
-      events.py
-    ports/
-      audio.py
-      speech.py
-      translation.py
-      recorder.py
-      repository.py
-    services/
-      caption_pipeline.py
-      replay_service.py
-      resource_governor.py
-    adapters/
-      soundcard_audio.py
-      whisper_stt.py
-      llm_translation.py
-      ffmpeg_recorder.py
-      sqlite_repository.py
-      windows_hotkeys.py
-    ui/
-      main_window.py
-      overlay.py
-      history_view.py
-      settings_view.py
-    infrastructure/
-      settings.py
-      logging.py
-      lifecycle.py
+  src/
+    live_caption_bridge/
+      __init__.py
+      __main__.py
+      main.py
+      domain/
+        models.py
+        events.py
+      ports/
+        audio.py
+        speech.py
+        translation.py
+        recorder.py
+        repository.py
+      services/
+        caption_pipeline.py
+        replay_service.py
+        resource_governor.py
+      adapters/
+        soundcard_audio.py
+        whisper_stt.py
+        llm_translation.py
+        ffmpeg_recorder.py
+        sqlite_repository.py
+        windows_hotkeys.py
+      ui/
+        main_window.py
+        overlay.py
+        history_view.py
+        settings_view.py
+      infrastructure/
+        settings.py
+        logging.py
+        lifecycle.py
   tests/
     unit/
     integration/
@@ -629,18 +630,18 @@ elas nao sao uma segunda lista de tarefas.
 
 ### M01.0 Prepare o primeiro teste
 
-Antes de criar o modelo, crie a pasta **tests/unit/** e o arquivo
-**tests/unit/test_models.py**. O prefixo **test_** é reconhecido pelo pytest; o
+Antes de criar o modelo, crie a pasta **tests/** e o arquivo
+**tests/test_models.py**. O prefixo **test_** é reconhecido pelo pytest; o
 `assert` compara o resultado real com o comportamento que queremos preservar. Este
 primeiro teste não testa a aplicação inteira: ele verifica somente que a origem do
 áudio tem dois valores distintos.
 
 ~~~powershell
-New-Item -ItemType Directory -Force -Path .\tests\unit
-New-Item -ItemType File -Force -Path .\tests\unit\test_models.py
+New-Item -ItemType Directory -Force -Path .\tests
+New-Item -ItemType File -Force -Path .\tests\test_models.py
 ~~~
 
-Path: tests/unit/test_models.py
+Path: tests/test_models.py
 ~~~python
 from live_caption_bridge.domain.models import AudioSource
 
@@ -654,7 +655,7 @@ o comportamento esperado, depois criamos o menor código que o satisfaz. Rode o 
 com o mesmo interpretador do ambiente ativo:
 
 ~~~powershell
-python -m pytest tests/unit/test_models.py -q
+python -m pytest tests/test_models.py -q
 ~~~
 
 Se aparecer `ModuleNotFoundError`, não altere o teste para contornar o erro; confirme
@@ -686,7 +687,7 @@ O teste criado em M01.0 já cobre esse primeiro tipo. Depois de salvar o enum, r
 novamente para confirmar que a implementação agora satisfaz o contrato:
 
 ~~~powershell
-python -m pytest tests/unit/test_models.py -q
+python -m pytest tests/test_models.py -q
 ~~~
 
 O resultado esperado é dois valores distintos. Se esse teste falhar, não crie ainda AudioChunk: o restante do projeto dependerá desta identidade.
@@ -726,7 +727,7 @@ de publicado; `slots=True` reduz memória para muitos objetos em trânsito.
 Salve o arquivo e crie o teste abaixo para verificar que AudioChunk preserva a origem
 e rejeita mutação:
 
-Path: tests/unit/test_models.py
+Path: tests/test_models.py
 ~~~python
 from dataclasses import FrozenInstanceError
 from live_caption_bridge.domain.models import AudioChunk, AudioSource
@@ -755,7 +756,7 @@ Rode o teste — ele deve passar. Se falhar, não avance: o resto da pipeline de
 deste contrato.
 
 ~~~powershell
-python -m pytest tests/unit/test_models.py -q
+python -m pytest tests/test_models.py -q
 ~~~
 
 ### M01.3 Transcript: resultado do reconhecimento
@@ -781,7 +782,7 @@ existe para que o pipeline possa registrar incerteza sem mudar o contrato.
 
 Adicione o teste correspondente:
 
-Path: tests/unit/test_models.py
+Path: tests/test_models.py
 ~~~python
 from live_caption_bridge.domain.models import Transcript
 
@@ -821,7 +822,7 @@ class Caption:
 
 Teste que Caption preserva original e tradução:
 
-Path: tests/unit/test_models.py
+Path: tests/test_models.py
 ~~~python
 from live_caption_bridge.domain.models import Caption
 
@@ -844,7 +845,7 @@ def test_caption_separates_original_from_translation() -> None:
 Valide o arquivo completo:
 
 ~~~powershell
-python -m pytest tests/unit/test_models.py -q
+python -m pytest tests/test_models.py -q
 ~~~
 
 ### M01.5 Uma porta e um fake
@@ -874,10 +875,10 @@ Agora crie o fake que implementa esse protocolo em memória. Ele permite testar 
 em milissegundos e deixa a janela real para uma etapa posterior:
 
 ~~~powershell
-New-Item -ItemType File -Force -Path .\tests\unit\fakes.py
+New-Item -ItemType File -Force -Path .\tests\fakes.py
 ~~~
 
-Path: tests/unit/fakes.py
+Path: tests/fakes.py
 ~~~python
 from live_caption_bridge.domain.models import Caption
 
@@ -893,10 +894,10 @@ class FakeCaptionSink:
 Crie o teste que publica uma Caption e verifica que `sink.last` é a mesma instância.
 Esse teste prova o contrato antes de uma janela real participar:
 
-Path: tests/unit/test_caption_sink.py
+Path: tests/test_caption_sink.py
 ~~~python
 from live_caption_bridge.domain.models import Caption
-from tests.unit.fakes import FakeCaptionSink
+from tests.fakes import FakeCaptionSink
 
 
 def test_fake_sink_receives_caption() -> None:
@@ -914,7 +915,7 @@ def test_fake_sink_receives_caption() -> None:
 ~~~
 
 ~~~powershell
-python -m pytest tests/unit -q
+python -m pytest tests -q
 ~~~
 
 Só avance quando o fake receber exatamente a legenda que o teste publicou.
@@ -1038,18 +1039,18 @@ Crie as duas camadas separadamente:
 New-Item -ItemType Directory -Force -Path .\src\live_caption_bridge\adapters
 New-Item -ItemType File -Force -Path .\src\live_caption_bridge\ports\audio.py
 New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\soundcard_audio.py
-New-Item -ItemType File -Force -Path .\tests\unit\test_audio_port.py
+New-Item -ItemType File -Force -Path .\tests\test_audio_port.py
 ~~~
 
-Crie **src/live_caption_bridge/ports/audio.py** com operações de listar e abrir uma fonte. Não coloque SoundCard nessa porta: a porta representa o contrato e o adaptador representará a biblioteca. Em seguida crie **adapters/soundcard_audio.py** apenas para listar microfones e imprimir nome e identificador.
+Crie **src/live_caption_bridge/ports/audio.py** com operações de listar e abrir uma fonte. Não coloque SoundCard nessa porta: a porta representa o contrato e o adaptador representará a biblioteca. Em seguida crie **src/live_caption_bridge/adapters/soundcard_audio.py** apenas para listar microfones e imprimir nome e identificador.
 
-Crie também **tests/unit/test_audio_port.py**. Use um enumerador falso para provar o
+Crie também **tests/test_audio_port.py**. Use um enumerador falso para provar o
 contrato sem exigir microfone conectado; o teste deve confirmar que a porta devolve
 nome e identificador, enquanto o teste manual do adaptador confirma que SoundCard
 consegue consultar o Windows. Essa divisão explica por que há porta e adapter.
 
 ~~~powershell
-python -m pytest tests/unit -q
+python -m pytest tests -q
 ~~~
 
 Valide primeiro uma lista vazia e depois uma lista real. O dispositivo padrão não deve ser assumido, pois Bluetooth, Remote Desktop e troca de headset alteram essa escolha.
@@ -1058,7 +1059,7 @@ Valide primeiro uma lista vazia e depois uma lista real. O dispositivo padrão n
 
 Acrescente leitura de blocos com taxa, canais, source e relógio monotônico. Use uma fila pequena e duração fixa; a fila limitada transforma atraso em um evento observável em vez de crescimento infinito de memória. Teste o produtor com um fake antes de ligá-lo ao dispositivo real.
 
-Para esse fake, crie **tests/unit/test_audio_worker.py** com um produtor que entrega
+Para esse fake, crie **tests/test_audio_worker.py** com um produtor que entrega
 três blocos e um evento de parada já acionado. Verifique que a fila recebe os blocos,
 que cada um conserva o relógio e que o worker termina. O teste não captura áudio: ele
 prova apenas a coordenação da thread.
@@ -1075,7 +1076,7 @@ python -c "import wave; w=wave.open('capture.wav'); print(w.getframerate(), w.ge
 
 Crie uma função pura de dBFS. Teste silêncio, sinal conhecido e clipping com bytes sintéticos; só depois mostre o nível do microfone. Isso separa erro de escala numérica de erro do dispositivo ou do Windows.
 
-Coloque esses casos em **tests/unit/test_audio_level.py**. Use um vetor de zeros para
+Coloque esses casos em **tests/test_audio_level.py**. Use um vetor de zeros para
 silêncio, uma amplitude conhecida para o sinal e o valor máximo representável para
 clipping. O objetivo é testar a matemática com dados previsíveis antes de culpar o
 driver.
@@ -1099,12 +1100,12 @@ Crie o arquivo da função e seu teste antes de ligar qualquer modelo:
 ~~~powershell
 New-Item -ItemType Directory -Force -Path .\src\live_caption_bridge\services
 New-Item -ItemType File -Force -Path .\src\live_caption_bridge\services\vad.py
-New-Item -ItemType File -Force -Path .\tests\unit\test_vad.py
+New-Item -ItemType File -Force -Path .\tests\test_vad.py
 ~~~
 
 Crie uma função VAD sem UI que receba blocos e devolva segmentos. Comece com silêncio, fala contínua, pausa e ruído sintéticos. Adicione pre-roll e duração máxima antes de usar áudio real; esses limites protegem a primeira sílaba e impedem um segmento sem fim de ocupar a fila.
 
-Crie **tests/unit/test_vad.py** com quatro sequências pequenas: silêncio, fala, fala
+Crie **tests/test_vad.py** com quatro sequências pequenas: silêncio, fala, fala
 com pausa e ruído. Cada teste deve comparar os intervalos devolvidos com o resultado
 esperado. Assim uma alteração no limiar não pode apagar a primeira sílaba sem que o
 teste revele a regressão.
@@ -1116,15 +1117,15 @@ Quando o VAD passar, crie a porta e o adapter:
 ~~~powershell
 New-Item -ItemType File -Force -Path .\src\live_caption_bridge\ports\speech.py
 New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\whisper_stt.py
-New-Item -ItemType File -Force -Path .\tests\unit\test_speech.py
+New-Item -ItemType File -Force -Path .\tests\test_speech.py
 ~~~
 
-Crie **ports/speech.py** com a operação transcribe(segment). Depois crie **adapters/whisper_stt.py** usando faster-whisper. O modelo deve ser carregado uma vez e reutilizado: carregá-lo por segmento tornaria a latência proporcional ao número de frases. O adaptador retorna texto, idioma e timestamps, nunca objetos da biblioteca diretamente.
+Crie **src/live_caption_bridge/ports/speech.py** com a operação transcribe(segment). Depois crie **src/live_caption_bridge/adapters/whisper_stt.py** usando faster-whisper. O modelo deve ser carregado uma vez e reutilizado: carregá-lo por segmento tornaria a latência proporcional ao número de frases. O adaptador retorna texto, idioma e timestamps, nunca objetos da biblioteca diretamente.
 
 Teste primeiro com um WAV curto conhecido e um fake de STT. Só então baixe o modelo configurado; downloads grandes ficam explícitos e fora do build da aplicação.
 
-O fake deve ficar em **tests/unit/fakes.py** e devolver sempre o mesmo texto para o
-mesmo segmento. Em **tests/unit/test_speech.py**, verifique texto, idioma e timestamps
+O fake deve ficar em **tests/fakes.py** e devolver sempre o mesmo texto para o
+mesmo segmento. Em **tests/test_speech.py**, verifique texto, idioma e timestamps
 sem importar faster-whisper. Um segundo teste de integração pode usar o WAV real; a
 separação mantém o teste rápido quando o modelo não está disponível.
 
@@ -1159,12 +1160,12 @@ Crie a porta, o adaptador fake e o teste em momentos separados:
 
 ~~~powershell
 New-Item -ItemType File -Force -Path .\src\live_caption_bridge\ports\translation.py
-New-Item -ItemType File -Force -Path .\tests\unit\test_translation.py
+New-Item -ItemType File -Force -Path .\tests\test_translation.py
 ~~~
 
-Crie **ports/translation.py** e um provider determinístico que mapeie texto conhecido para resposta conhecida. Teste inglês para o idioma configurado e outros idiomas para inglês sem HTTP. O fake é a especificação executável do que o pipeline espera.
+Crie **src/live_caption_bridge/ports/translation.py** e um provider determinístico que mapeie texto conhecido para resposta conhecida. Teste inglês para o idioma configurado e outros idiomas para inglês sem HTTP. O fake é a especificação executável do que o pipeline espera.
 
-Escreva esses casos em **tests/unit/test_translation.py**. O fake recebe texto e
+Escreva esses casos em **tests/test_translation.py**. O fake recebe texto e
 idiomas, devolve um dicionário fixo e o teste verifica a direção da tradução e a
 presença de **uncertain**. Como não há rede, uma falha nesse arquivo aponta para o
 contrato, não para o servidor.
@@ -1186,7 +1187,7 @@ New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\llm_tran
 New-Item -ItemType File -Force -Path .\tests\integration\test_llm_translation.py
 ~~~
 
-Crie **adapters/llm_translation.py** usando httpx, timeout curto e URL carregada do .env. Não coloque URL ou modelo em variável temporária do PowerShell. Faça primeiro um teste contra um servidor falso local e confirme que o log não imprime prompts, respostas completas ou tokens secretos.
+Crie **src/live_caption_bridge/adapters/llm_translation.py** usando httpx, timeout curto e URL carregada do .env. Não coloque URL ou modelo em variável temporária do PowerShell. Faça primeiro um teste contra um servidor falso local e confirme que o log não imprime prompts, respostas completas ou tokens secretos.
 
 ### M04.4 Conecte o Ollama centralizado
 
@@ -1205,12 +1206,12 @@ New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\sqlite_r
 New-Item -ItemType File -Force -Path .\tests\integration\test_sqlite_repository.py
 ~~~
 
-Crie **adapters/sqlite_repository.py**, habilite WAL e insira original e tradução na mesma transação quando ambas existirem. Salve o original mesmo se o container cair; isso preserva a evidência e permite reprocessamento posterior.
+Crie **src/live_caption_bridge/adapters/sqlite_repository.py**, habilite WAL e insira original e tradução na mesma transação quando ambas existirem. Salve o original mesmo se o container cair; isso preserva a evidência e permite reprocessamento posterior.
 
 **Checkpoint M04.** URL e modelo mudam somente por configuração, falhas externas são simuláveis e a queda do serviço não perde o original. Registre em **docs/lab/M04-llm.md**.
 
 ~~~powershell
-python -m pytest tests/unit tests/integration -q
+python -m pytest tests -q
 ~~~
 
 Leitura: [HTTPX](https://www.python-httpx.org/), [JSON Schema](https://json-schema.org/learn/getting-started-step-by-step), [SQLite](https://www.sqlite.org/lang.html) e a documentação do provider escolhido.
@@ -1221,19 +1222,19 @@ Leitura: [HTTPX](https://www.python-httpx.org/), [JSON Schema](https://json-sche
 
 ### M05.1 Enumere endpoints loopback
 
-Reabra **ports/audio.py** e acrescente o caso loopback sem criar uma segunda porta.
+Reabra **src/live_caption_bridge/ports/audio.py** e acrescente o caso loopback sem criar uma segunda porta.
 No adapter, crie um teste separado para a enumeração do speaker:
 
 ~~~powershell
-New-Item -ItemType File -Force -Path .\tests\unit\test_loopback_enumeration.py
+New-Item -ItemType File -Force -Path .\tests\test_loopback_enumeration.py
 ~~~
 
-Estenda **ports/audio.py** para distinguir microfone e speaker loopback. Liste endpoints e IDs estáveis e trate lista vazia como configuração pendente. Primeiro teste o enumerador; não inicie duas capturas enquanto a identidade ainda for ambígua.
+Estenda **src/live_caption_bridge/ports/audio.py** para distinguir microfone e speaker loopback. Liste endpoints e IDs estáveis e trate lista vazia como configuração pendente. Primeiro teste o enumerador; não inicie duas capturas enquanto a identidade ainda for ambígua.
 
 ### M05.2 Reutilize o worker
 
-Coloque a coordenação dos dois workers em **services/audio_workers.py** e cubra a
-identidade em **tests/unit/test_audio_workers.py**. O arquivo de serviço coordena
+Coloque a coordenação dos dois workers em **src/live_caption_bridge/services/audio_workers.py** e cubra a
+identidade em **tests/test_audio_workers.py**. O arquivo de serviço coordena
 threads; ele não deve conhecer detalhes da API SoundCard.
 
 Adicione um segundo worker que publique AudioChunk(source=SYSTEM). Não duplique fila, timestamps ou cálculo de nível. A identidade é um campo do dado porque o pipeline, histórico e replay precisam saber de onde veio cada amostra.
@@ -1304,7 +1305,7 @@ Leitura: [FFmpeg](https://ffmpeg.org/ffmpeg.html), [formatos](https://ffmpeg.org
 ### M07.1 Congele três janelas temporais
 
 Use o **replay_service.py** criado em M06 e acrescente apenas a seleção simultânea das
-três fontes. Crie **tests/unit/test_replay_window.py** para verificar que início, fim
+três fontes. Crie **tests/test_replay_window.py** para verificar que início, fim
 e gaps de cada ring são preservados antes do mux.
 
 Selecione a mesma janela nos rings de vídeo, microfone e sistema. Registre início, fim e gaps antes do mux. Um registro explícito permite explicar por que uma faixa começa mais tarde sem inventar amostras.
@@ -1343,7 +1344,7 @@ New-Item -ItemType Directory -Force -Path .\src\live_caption_bridge\infrastructu
 New-Item -ItemType File -Force -Path .\src\live_caption_bridge\infrastructure\settings.py
 ~~~
 
-Crie **infrastructure/settings.py** para ler .env, limites e diretório de dados. Teste valor padrão, valor inválido e precedência. O arquivo dedicado evita repetir parsing em cada adapter e permite que Windows e Docker usem os mesmos nomes LCB_*.
+Crie **src/live_caption_bridge/infrastructure/settings.py** para ler .env, limites e diretório de dados. Teste valor padrão, valor inválido e precedência. O arquivo dedicado evita repetir parsing em cada adapter e permite que Windows e Docker usem os mesmos nomes LCB_*.
 
 ### M08.2 Torne o encerramento explícito
 
@@ -1351,10 +1352,10 @@ Crie o teste ao lado do lifecycle, antes de conectar hotkeys:
 
 ~~~powershell
 New-Item -ItemType File -Force -Path .\src\live_caption_bridge\infrastructure\lifecycle.py
-New-Item -ItemType File -Force -Path .\tests\unit\test_lifecycle.py
+New-Item -ItemType File -Force -Path .\tests\test_lifecycle.py
 ~~~
 
-Crie **infrastructure/lifecycle.py** e pare na ordem: entradas, drenagem necessária, persistência e fechamento. Teste encerramento normal e exceção durante startup. Sem essa ordem, workers podem escrever depois do banco ou deixar FFmpeg órfão.
+Crie **src/live_caption_bridge/infrastructure/lifecycle.py** e pare na ordem: entradas, drenagem necessária, persistência e fechamento. Teste encerramento normal e exceção durante startup. Sem essa ordem, workers podem escrever depois do banco ou deixar FFmpeg órfão.
 
 ### M08.3 Conecte hotkeys reais
 
@@ -1366,7 +1367,7 @@ New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\windows_
 New-Item -ItemType File -Force -Path .\tests\e2e\test_hotkeys.py
 ~~~
 
-Crie **adapters/windows_hotkeys.py** e **tests/e2e/test_hotkeys.py**. Marque o segundo
+Crie **src/live_caption_bridge/adapters/windows_hotkeys.py** e **tests/e2e/test_hotkeys.py**. Marque o segundo
 com **hotkey** e execute-o apenas no Windows; o teste portátil deve continuar usando o
 fake do M01. Essa separação explica por que RegisterHotKey não entra no contêiner.
 
@@ -1374,7 +1375,7 @@ Troque a hotkey falsa por RegisterHotKey, detecte conflito e encaminhe somente u
 
 ### M08.4 Meça e degrade uma coisa por vez
 
-Crie **services/resource_governor.py** e **tests/unit/test_resource_governor.py**.
+Crie **src/live_caption_bridge/services/resource_governor.py** e **tests/test_resource_governor.py**.
 Primeiro faça o teste observar uma fila acima do limite; só depois ligue a redução de
 FPS. Uma métrica sem ação é diagnóstico, não governança.
 

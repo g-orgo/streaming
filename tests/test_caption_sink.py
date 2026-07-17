@@ -1,5 +1,5 @@
 from live_caption_bridge.domain.models import Caption
-from tests.unit.fakes import FakeCaptionSink
+from tests.fakes import FakeCaptionSink
 
 
 def test_fake_sink_receives_caption() -> None:

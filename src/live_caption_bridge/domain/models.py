@@ -2,14 +2,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 class AudioSource(StrEnum):
-    """Enum representing different audio sources."""
-
     MICROPHONE = "microphone"
     SYSTEM = "system"
 
 @dataclass(frozen=True, slots=True)
 class AudioChunk:
-    """Represents a chunk of audio data."""
     source: AudioSource
     samples: bytes
     sample_rate: int
@@ -19,14 +16,12 @@ class AudioChunk:
 
 @dataclass(frozen=True, slots=True)
 class Transcript:
-    """Represents a transcript of audio data."""
     source: AudioSource
     text: str
     language: str
     started_ns: int
     ended_ns: int
     confidence: float | None = None
-    
 
 @dataclass(frozen=True, slots=True)
 class Caption:
@@ -36,5 +31,3 @@ class Caption:
     target_lang: str
     started_ns: int
     ended_ns: int
-    
-    
