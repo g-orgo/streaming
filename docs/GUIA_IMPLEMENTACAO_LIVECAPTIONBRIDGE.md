@@ -339,7 +339,7 @@ name = "live-caption-bridge"
 version = "0.1.0"
 description = "Legendas simultaneas e replay recente no Windows"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 ```
 
 Esses campos identificam o pacote, limitam a faixa de Python e apontam para o

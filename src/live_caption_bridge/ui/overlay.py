@@ -1,5 +1,7 @@
+import sys
+
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QWidget, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
 from live_caption_bridge.domain.models import Caption
 
 class Overlay(QWidget):
@@ -25,3 +27,23 @@ class Overlay(QWidget):
         self._label.setText(
             caption.translated or caption.original
         )
+
+
+def main() -> None:
+    app = QApplication(sys.argv)
+    overlay = Overlay()
+    overlay.show()
+    caption = Caption(
+        original="Olá mundo",
+        translated="Hello world",
+        source_lang="pt",
+        target_lang="en",
+        started_ns=0,
+        ended_ns=100,
+    )
+    overlay.display_caption(caption)
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
