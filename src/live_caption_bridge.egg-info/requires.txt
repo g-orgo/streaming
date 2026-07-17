@@ -1,0 +1,16 @@
+PySide6
+soundcard
+numpy
+faster-whisper
+mss
+pydantic-settings
+psutil
+httpx
+keyring
+
+[dev]
+pytest
+pytest-qt
+ruff
+mypy
+pip-tools

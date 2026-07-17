@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "live-caption-bridge"
+version = "0.1.0"
+description = "Legendas simultaneas e replay recente no Windows"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "PySide6",
+  "soundcard",
+  "numpy",
+  "faster-whisper",
+  "mss",
+  "pydantic-settings",
+  "psutil",
+  "httpx",
+  "keyring",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-qt", "ruff", "mypy", "pip-tools"]
+
+[project.scripts]
+live-caption-bridge = "live_caption_bridge.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
