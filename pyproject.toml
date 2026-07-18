@@ -12,7 +12,7 @@ dependencies = [
   "PySide6",
   "pyaudio",
   "numpy",
-  "faster-whisper",
+  "vosk",
   "mss",
   "pydantic-settings",
   "psutil",

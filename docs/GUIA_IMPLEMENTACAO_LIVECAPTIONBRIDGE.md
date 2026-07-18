@@ -25,7 +25,7 @@ biblioteca ou LLM especifica.
 | Runtime | Python 3.12 x64 | Ecossistema e compatibilidade atual |
 | UI/overlay | PySide6 | Qt nativo, sinais, threads e flags de janela |
 | Microfone/loopback | PyAudio (PortAudio) | WASAPI e loopback no Windows, compatível com mais drivers |
-| STT | faster-whisper | CTranslate2, VAD e timestamps de palavra |
+| STT | Vosk | APIs Kaldi, offline, sem dependência externa |
 | Traducao | Interface LLM estruturada | Provider local ou remoto intercambiavel |
 | Captura de tela | `mss` primeiro; DXCam opcional | Simplicidade; otimize apos medir |
 | Encoding/mux | FFmpeg | MP4, H.264/AAC e ampla interoperabilidade |
@@ -79,7 +79,7 @@ As dependencias declaradas no primeiro checkpoint tem responsabilidades delibera
 | `PySide6` | Interface, janelas e sinais Qt | Permite overlay nativo, sempre no topo e integrado ao loop de eventos do Windows |
 | `pyaudio` | Captura microfone e loopback por WASAPI (PortAudio) | Alternativa ao SoundCard que evita `assert` de formato e funciona com mais drivers Windows |
 | `numpy` | Arrays e transformacoes numericas | E o formato eficiente usado para PCM, resampling e entrada do STT |
-| `faster-whisper` | Transcricao local de fala | Usa CTranslate2 para reduzir custo e latencia do Whisper em CPU/GPU |
+| `vosk` | Transcricao local de fala | Modelo Kaldi offline, sem token, sem download do Hugging Face |
 | `mss` | Captura de tela | Oferece um primeiro adaptador simples antes de otimizar com APIs mais especificas |
 | `pydantic-settings` | Configuracao tipada e validada | Impede valores invalidos e centraliza variaveis com prefixo `LCB_` |
 | `psutil` | Metricas de CPU, RAM, disco e processos | Alimenta diagnostico e degradacao controlada sob pressao de recursos |
@@ -353,7 +353,7 @@ dependencies = [
   "PySide6",
   "pyaudio",
   "numpy",
-  "faster-whisper",
+  "vosk",
   "mss",
   "pydantic-settings",
   "psutil",
@@ -623,6 +623,34 @@ Os marcos abaixo sao o percurso executavel do projeto. Cada um parte do resultad
 verde do anterior e termina com uma demonstracao verificavel. As referencias tecnicas
 que aparecem depois servem para consulta no momento em que a etapa as torna necessarias;
 elas nao sao uma segunda lista de tarefas.
+
+### Regra: encerramento de tópicos
+
+Ao final de cada subtópico `### M0x.x` ou `### Mxx.x`, inclua um bloco de resumo que:
+
+- liste as **decisões** tomadas naquele tópico (formato de dados, biblioteca escolhida, assinatura de função, estratégia de teste, etc.);
+- explique do que **cada peça criada ou modificada** é individualmente responsável;
+- mostre como essas peças se conectam ao tópico anterior e ao próximo.
+
+Esse bloco deve vir antes do separador visual para o próximo tópico. Exemplo:
+
+~~~markdown
+**Decisões do tópico.**
+- `AudioChunk` usa `bytes` para amostras em vez de `numpy.ndarray` porque ...;
+- `FakeAudioSource` produz 5 segundos de senoide pura para que os testes ...
+- O worker de áudio sinaliza parada com `threading.Event` em vez de variável ...
+
+**Responsabilidades.**
+- `domain/audio.py`: `AudioChunk` carrega metadados + amostras ...
+- `adapters/pyaudio_audio.py`: `pyaudio` converte dispositivo real em `AudioChunk` ...
+- `services/audio_worker.py`: gerencia o loop de captura, parada e enfileiramento ...
+- `tests/test_audio_worker.py`: cobre início, parada e timeout do worker ...
+
+**Conexões.** O `AudioChunk` produzido aqui alimenta o VAD (M03.1) e o STT (M03.2).
+O próximo tópico usará o mesmo worker para conectar a fonte ao pipeline de legenda.
+~~~
+
+Essa regra vale para todo o guia e para qualquer documentação criada sob este template.
 
 ## M01 - Domínio e overlay falso
 
@@ -1586,56 +1614,63 @@ class SpeechPort(Protocol):
 
 Path: src/live_caption_bridge/adapters/whisper_stt.py
 ~~~python
+import json
 import logging
+from pathlib import Path
 
 from live_caption_bridge.domain.models import AudioChunk
 from live_caption_bridge.ports.speech import SpeechSegment
 
 logger = logging.getLogger(__name__)
 
+_MODEL_MAP: dict[str, str] = {
+    "tiny": "vosk-model-small-en-us-0.15",
+    "small": "vosk-model-small-en-us-0.15",
+    "medium": "vosk-model-en-us-0.22",
+    "large": "vosk-model-en-us-0.22",
+}
+
+
+def _default_model_path(model_size: str) -> str:
+    name = _MODEL_MAP.get(model_size, "vosk-model-small-en-us-0.15")
+    return str(Path.home() / "Vosk" / name)
+
 
 class WhisperSTT:
     def __init__(self, model_size: str = "tiny", device: str = "cpu") -> None:
-        self._model_size = model_size
-        self._device = device
+        self._model_path = _default_model_path(model_size)
         self._model = None
+        self._rec = None
+        self._sample_rate = 16000
 
     def _load(self) -> None:
         if self._model is not None:
             return
-        from faster_whisper import WhisperModel
+        from vosk import KaldiRecognizer, Model
 
-        self._model = WhisperModel(self._model_size, device=self._device)
+        logger.info("Carregando modelo Vosk de %s", self._model_path)
+        self._model = Model(self._model_path)
+        self._rec = KaldiRecognizer(self._model, self._sample_rate)
 
     def transcribe(self, chunk: AudioChunk) -> SpeechSegment:
-        import io
-        import wave
-
         self._load()
-        wav_buf = io.BytesIO()
-        with wave.open(wav_buf, "wb") as w:
-            w.setnchannels(chunk.channels)
-            w.setsampwidth(2)
-            w.setframerate(chunk.sample_rate)
-            w.writeframes(chunk.samples)
-        wav_buf.seek(0)
-        segments, info = self._model.transcribe(wav_buf, beam_size=1)
-        text = ""
-        seg_start = chunk.started_ns
-        seg_end = chunk.ended_ns
-        confidence: float | None = None
-        for s in segments:
-            text += s.text + " "
-            confidence = s.avg_logprob if hasattr(s, "avg_logprob") else None
-        text = text.strip()
-        if not text:
-            text = ""
+
+        data = chunk.samples
+        if chunk.channels > 1:
+            import array
+            raw = array.array("h", data)
+            data = raw[:: chunk.channels].tobytes()
+
+        self._rec.AcceptWaveform(data)
+        result = json.loads(self._rec.FinalResult())
+        text = result.get("text", "").strip()
+
         return SpeechSegment(
             text=text,
-            language=info.language if hasattr(info, "language") else "",
-            start_ns=seg_start,
-            end_ns=seg_end,
-            confidence=confidence,
+            language="en",
+            start_ns=chunk.started_ns,
+            end_ns=chunk.ended_ns,
+            confidence=None,
         )
 ~~~
 
@@ -1765,7 +1800,7 @@ print(f"Idioma: {result.language}, Confiança: {result.confidence}")
 print("RTF < 1.0 significa tempo real; acima disso o modelo não acompanha.")
 ~~~
 
-Se RTF > 1, troque para modelo `tiny` ou ative GPU com `device="cuda"`.
+Se RTF > 1, troque para modelo `tiny`. Vosk executa apenas em CPU.
 
 ### M03.4 Conecte transcript ao overlay
 
@@ -1869,7 +1904,7 @@ python -m pytest tests -q
 python -m ruff check .
 ~~~
 
-Leitura: [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [CTranslate2](https://opennmt.net/CTranslate2/) e [NumPy](https://numpy.org/doc/stable/user/absolute_beginners.html).
+Leitura: [Vosk](https://alphacephei.com/vosk/), [Vosk modelos](https://alphacephei.com/vosk/models) e [NumPy](https://numpy.org/doc/stable/user/absolute_beginners.html).
 
 ## M04 - Tradução por LLM e persistência
 
@@ -3635,48 +3670,45 @@ Nao envie cada bloco diretamente ao Whisper. Monte segmentos usando VAD:
 - preserve os timestamps originais;
 - separe microfone e sistema para nao misturar falantes indevidamente.
 
-O faster-whisper oferece filtro VAD e timestamps. Ainda assim, teste conversas
+O Vosk trabalha com segmentos de fala completos. Ainda assim, teste conversas
 curtas, fala continua, musica, silencio e ruido. Uma legenda parcial pode ser
 atualizada, mas apenas a final entra no historico permanente.
 
-### 9. STT com faster-whisper
+### 9. STT com Vosk
 
 Use primeiro um arquivo WAV curto e um modelo pequeno para provar que o adaptador
-retorna texto e idioma. Depois meca o real-time factor e memoria; so entao carregue
+retorna texto. Depois meca o real-time factor e memoria; so entao carregue
 o modelo uma vez no processo de longa duracao. A etapa final e substituir o arquivo
 por segmentos do VAD, preservando o mesmo contrato e os mesmos testes de latencia.
+
+Baixe o modelo em https://alphacephei.com/vosk/models e extraia em `%USERPROFILE%\Vosk\`:
+
+| Modelo | Tamanho | Descricao |
+| --- | --- | --- |
+| `vosk-model-small-en-us-0.15` | ~40 MB | Ingles, rapido, recomendado para inicio |
+| `vosk-model-en-us-0.22` | ~1.8 GB | Ingles, maior acuracia |
 
 Carregue uma unica instancia do modelo por processo:
 
 Path: src/live_caption_bridge/adapters/whisper_stt.py
 ```python
-from faster_whisper import WhisperModel
+import json
+
+from vosk import KaldiRecognizer, Model
 
 class WhisperSpeechRecognizer:
-    def __init__(self, model_name: str, device: str = "cpu") -> None:
-        compute_type = "int8" if device == "cpu" else "float16"
-        self._model = WhisperModel(model_name, device=device,
-                                   compute_type=compute_type)
+    def __init__(self, model_path: str, sample_rate: int = 16000) -> None:
+        self._model = Model(model_path)
+        self._rec = KaldiRecognizer(self._model, sample_rate)
 
-    def transcribe(self, wav_path: str):
-        segments, info = self._model.transcribe(
-            wav_path,
-            beam_size=5,
-            vad_filter=True,
-            word_timestamps=True,
-        )
-        text = " ".join(segment.text.strip() for segment in segments).strip()
-        return text, info.language
+    def transcribe(self, pcm_bytes: bytes) -> str:
+        self._rec.AcceptWaveform(pcm_bytes)
+        result = json.loads(self._rec.FinalResult())
+        return result.get("text", "").strip()
 ```
 
-Uma instancia unica evita duplicar o modelo na RAM ou VRAM. `int8` reduz memoria e
-custo em CPU; `float16` aproveita GPUs compativeis. `beam_size=5` busca alternativas
-para ganhar qualidade, enquanto VAD evita inferencia sobre silencio e timestamps de
-palavra preservam sincronizacao. Esses valores sao ponto de partida: benchmark de
-latencia e acuracia decide se devem mudar no hardware alvo.
-
-No produto, evite arquivos temporarios por segmento: adapte arrays NumPy ou um
-buffer WAV em memoria. O exemplo acima serve primeiro para comprovar o modelo.
+Uma instancia unica evita duplicar o modelo na RAM. O Vosk executa apenas em CPU
+e nao requer GPU. O audio deve ser PCM 16-bit mono 16 kHz. 
 
 Meca `real-time factor = tempo de inferencia / duracao do audio`. Para legendas
 ao vivo ele precisa ficar abaixo de 1 de forma sustentada, idealmente com folga.
@@ -4110,7 +4142,8 @@ Considere a primeira versao satisfatoria somente quando:
 - Qt for Python, flags de janela: <https://doc.qt.io/qtforpython-6/PySide6/QtCore/Qt.html>
 - Qt for Python, widgets e translucidez: <https://doc.qt.io/qtforpython-6/PySide6/QtWidgets/QWidget.html>
 - PyAudio (PortAudio bindings): <https://people.csail.mit.edu/hubert/pyaudio/>
-- faster-whisper: <https://github.com/SYSTRAN/faster-whisper>
+- Vosk: <https://alphacephei.com/vosk/>
+- Vosk modelos: <https://alphacephei.com/vosk/models>
 - Ollama em Docker: <https://docs.ollama.com/docker>
 - Compatibilidade OpenAI do Ollama: <https://docs.ollama.com/api/openai-compatibility>
 - Variaveis e `.env` no Docker Compose: <https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/>
