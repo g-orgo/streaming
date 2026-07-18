@@ -1,0 +1,1 @@
+Com exceção de pedidos diretos nunca deveremos alterar código aqui apenas documentações.

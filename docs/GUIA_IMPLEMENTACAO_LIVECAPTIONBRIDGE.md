@@ -24,7 +24,7 @@ biblioteca ou LLM especifica.
 | --- | --- | --- |
 | Runtime | Python 3.12 x64 | Ecossistema e compatibilidade atual |
 | UI/overlay | PySide6 | Qt nativo, sinais, threads e flags de janela |
-| Microfone/loopback | SoundCard | WASAPI e loopback no Windows |
+| Microfone/loopback | PyAudio (PortAudio) | WASAPI e loopback no Windows, compatível com mais drivers |
 | STT | faster-whisper | CTranslate2, VAD e timestamps de palavra |
 | Traducao | Interface LLM estruturada | Provider local ou remoto intercambiavel |
 | Captura de tela | `mss` primeiro; DXCam opcional | Simplicidade; otimize apos medir |
@@ -77,7 +77,7 @@ As dependencias declaradas no primeiro checkpoint tem responsabilidades delibera
 | Dependencia | Para que serve | Por que entra no projeto |
 | --- | --- | --- |
 | `PySide6` | Interface, janelas e sinais Qt | Permite overlay nativo, sempre no topo e integrado ao loop de eventos do Windows |
-| `soundcard` | Captura microfone e loopback por WASAPI | Mantem as duas fontes identificadas sem escrever a camada de audio do zero |
+| `pyaudio` | Captura microfone e loopback por WASAPI (PortAudio) | Alternativa ao SoundCard que evita `assert` de formato e funciona com mais drivers Windows |
 | `numpy` | Arrays e transformacoes numericas | E o formato eficiente usado para PCM, resampling e entrada do STT |
 | `faster-whisper` | Transcricao local de fala | Usa CTranslate2 para reduzir custo e latencia do Whisper em CPU/GPU |
 | `mss` | Captura de tela | Oferece um primeiro adaptador simples antes de otimizar com APIs mais especificas |
@@ -351,7 +351,7 @@ Path: pyproject.toml
 ```toml
 dependencies = [
   "PySide6",
-  "soundcard",
+  "pyaudio",
   "numpy",
   "faster-whisper",
   "mss",
@@ -587,7 +587,7 @@ StreamingProject/
         replay_service.py
         resource_governor.py
       adapters/
-        soundcard_audio.py
+        pyaudio_audio.py
         whisper_stt.py
         llm_translation.py
         ffmpeg_recorder.py
@@ -695,7 +695,7 @@ O resultado esperado é dois valores distintos. Se esse teste falhar, não crie 
 ### M01.2 AudioChunk: primeiro dado que atravessa o sistema
 
 AudioChunk transporta amostras PCM e timestamps entre captura, VAD e STT. Ele não
-conhece SoundCard nem nenhuma biblioteca — é apenas um recipiente de dados. Abra o
+conhece PyAudio nem nenhuma biblioteca — é apenas um recipiente de dados. Abra o
 arquivo de modelos e adicione a dataclass abaixo de AudioSource:
 
 Path: src/live_caption_bridge/domain/models.py
@@ -1092,11 +1092,11 @@ Crie as pastas e arquivos:
 ~~~powershell
 New-Item -ItemType Directory -Force -Path .\src\live_caption_bridge\adapters
 New-Item -ItemType File -Force -Path .\src\live_caption_bridge\ports\audio.py
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\soundcard_audio.py
+New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\pyaudio_audio.py
 New-Item -ItemType File -Force -Path .\tests\test_audio_port.py
 ~~~
 
-A porta descreve o que o domínio precisa sem nomear SoundCard. Qualquer adaptador que
+A porta descreve o que o domínio precisa sem nomear PyAudio. Qualquer adaptador que
 cumprir este Protocol pode ser usado:
 
 Path: src/live_caption_bridge/ports/audio.py
@@ -1121,16 +1121,22 @@ class AudioSourcePort(Protocol):
 ~~~
 
 Agora crie um adaptador mínimo que apenas enumera dispositivos. Ele serve para validar
-que o SoundCard está funcional antes de escrever lógica de captura:
+que o PyAudio está funcional antes de escrever lógica de captura:
 
-Path: src/live_caption_bridge/adapters/soundcard_audio.py
+Path: src/live_caption_bridge/adapters/pyaudio_audio.py
 ~~~python
-import soundcard as sc
+import pyaudio
 
 
 def list_devices() -> list[dict[str, str]]:
-    mics = sc.all_microphones(include_loopback=True)
-    return [{"name": mic.name, "id": mic.id} for mic in mics]
+    p = pyaudio.PyAudio()
+    devices: list[dict[str, str]] = []
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        if info["maxInputChannels"] > 0:
+            devices.append({"name": info["name"], "id": str(i)})
+    p.terminate()
+    return devices
 
 
 if __name__ == "__main__":
@@ -1168,7 +1174,7 @@ python -m pytest tests/test_audio_port.py -q
 Valide também o adaptador real manualmente:
 
 ~~~powershell
-python -m live_caption_bridge.adapters.soundcard_audio
+python -m live_caption_bridge.adapters.pyaudio_audio
 ~~~
 
 Deve listar seus microfones e speakers. Se a lista vier vazia, verifique permissões
@@ -1230,21 +1236,33 @@ no áudio:
 Path: docs/lab/capture_test.py
 ~~~python
 import wave
-import soundcard as sc
-import numpy as np
+
+import pyaudio
 
 DURATION = 5
 SAMPLE_RATE = 16000
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
 
-mic = sc.default_microphone()
-frames = mic.record(samplerate=SAMPLE_RATE, numframes=SAMPLE_RATE * DURATION)
-audio = (np.int16(frames[:, 0] * 32767)).tobytes()
+p = pyaudio.PyAudio()
+stream = p.open(
+    format=FORMAT, channels=CHANNELS, rate=SAMPLE_RATE,
+    input=True, frames_per_buffer=CHUNK,
+)
+frames = []
+for _ in range(0, int(SAMPLE_RATE / CHUNK * DURATION)):
+    data = stream.read(CHUNK)
+    frames.append(data)
+stream.stop_stream()
+stream.close()
+p.terminate()
 
 with wave.open("docs/lab/capture.wav", "wb") as w:
-    w.setnchannels(1)
-    w.setsampwidth(2)
+    w.setnchannels(CHANNELS)
+    w.setsampwidth(pyaudio.PyAudio().get_sample_size(FORMAT))
     w.setframerate(SAMPLE_RATE)
-    w.writeframes(audio)
+    w.writeframes(b"".join(frames))
 ~~~
 
 Execute e confira os metadados:
@@ -1356,7 +1374,7 @@ o worker não parar.
 a fila não cresce sem limite e o worker encerra com `threading.Event`. Registre em
 **docs/lab/M02-audio.md**.
 
-Leitura: [wave](https://docs.python.org/3/library/wave.html), [threading](https://docs.python.org/3/library/threading.html), [queue](https://docs.python.org/3/library/queue.html) e [SoundCard](https://soundcard.readthedocs.io/en/latest/).
+Leitura: [wave](https://docs.python.org/3/library/wave.html), [threading](https://docs.python.org/3/library/threading.html), [queue](https://docs.python.org/3/library/queue.html) e [PyAudio](https://people.csail.mit.edu/hubert/pyaudio/).
 
 ## M03 - VAD, STT e legenda
 
@@ -1701,18 +1719,30 @@ Path: docs/lab/measure_stt.py
 ~~~python
 import time
 
-import numpy as np
-import soundcard as sc
+import pyaudio
 
 from live_caption_bridge.domain.models import AudioChunk, AudioSource
 from live_caption_bridge.adapters.whisper_stt import WhisperSTT
 
 DURATION = 5
 SAMPLE_RATE = 16000
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
 
-mic = sc.default_microphone()
-frames = mic.record(samplerate=SAMPLE_RATE, numframes=SAMPLE_RATE * DURATION)
-audio = (np.int16(frames[:, 0] * 32767)).tobytes()
+p = pyaudio.PyAudio()
+stream = p.open(
+    format=FORMAT, channels=CHANNELS, rate=SAMPLE_RATE,
+    input=True, frames_per_buffer=CHUNK,
+)
+frames = []
+for _ in range(0, int(SAMPLE_RATE / CHUNK * DURATION)):
+    data = stream.read(CHUNK)
+    frames.append(data)
+stream.stop_stream()
+stream.close()
+p.terminate()
+audio = b"".join(frames)
 
 chunk = AudioChunk(
     source=AudioSource.MICROPHONE,
@@ -1847,6 +1877,14 @@ Leitura: [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [CTranslat
 
 ### M04.1 Porta de tradução e provider falso
 
+Traduzir texto com LLM local (Ollama) é uma operação bloqueante que pode falhar por
+rede, JSON malformado ou modelo carregando. Por isso a porta devolve um objeto com
+metadados explícitos, não uma string simples. O campo `uncertain` sinaliza que o
+resultado não é confiável — o pipeline pode exibir o original em vez de arriscar uma
+tradução errada. O fake vem primeiro porque permite testar direção, incerteza e
+validação sem jamais tocar na rede: se o teste falhar, o problema está no contrato,
+não no servidor.
+
 Path: src/live_caption_bridge/ports/translation.py
 ~~~python
 from typing import Protocol
@@ -1933,6 +1971,12 @@ python -m pytest tests/test_translation.py -q
 
 ### M04.2 Valide a resposta estruturada
 
+O LLM pode devolver texto livre, não JSON. Se ignorarmos essa validade, uma resposta
+malformada pode salvar `""` no banco ou exibir `None` no overlay. A validação acontece
+antes de publicar a legenda e antes de gravar — ela é uma barreira explícita entre o
+texto do modelo e o contrato da aplicação. Se a validação falhar, o pipeline usa o
+original e marca como incerto, em vez de propagar um dado corrompido.
+
 Path: src/live_caption_bridge/ports/translation.py (adicione ao final)
 ~~~python
 class TranslationValidationError(ValueError):
@@ -1988,6 +2032,14 @@ python -m pytest tests/test_translation.py -q
 ~~~
 
 ### M04.3 Cliente HTTP com configuração
+
+O cliente HTTP só aparece depois de o fake e a validação passarem. A URL e o modelo
+saem de variáveis de ambiente (`LCB_LLM_URL`, `LCB_LLM_MODEL`) para que o mesmo
+binário funcione em Docker, Windows ou servidor centralizado sem recompilar. O prompt
+é construído para forçar o modelo a responder JSON, e a resposta bruta passa pelo
+`json.loads` antes de tocar o validador. Se o parsing falhar ou o servidor retornar
+erro, o resultado cai para `uncertain=True` com o texto original — nunca uma exceção
+não tratada.
 
 Path: src/live_caption_bridge/adapters/llm_translation.py
 ~~~python
@@ -2113,6 +2165,14 @@ python docs/lab/ollama_test.py
 
 ### M04.5 Trate falhas antes do banco
 
+Uma tradução indisponível não pode interromper a captura. O retry cobre apenas
+falhas transitórias (429 rate limit, 502/503/504) com backoff linear. Erros 4xx
+permanentes (400, 401, 404) sobem imediatamente porque retentar não vai curá-los.
+O circuit breaker e o fallback para o texto original são o último degrau: se a
+tradução falhar depois das tentativas, o pipeline publica o original com
+`uncertain=True` e o banco salva sem tradução. A separação entre falha controlada
+e exceção permite que o log mostre o problema sem derrubar o worker.
+
 Path: src/live_caption_bridge/adapters/llm_translation.py (adicione retry)
 ~~~python
 import time
@@ -2160,6 +2220,14 @@ python -m pytest tests/integration/test_llm_translation.py -q
 ~~~
 
 ### M04.6 Persista sem depender da rede
+
+O banco só é criado depois de toda a cadeia de tradução estar validada. WAL
+(Write-Ahead Logging) é ativado porque a captura roda em thread separada e o banco
+pode ser lido durante uma escrita — sem WAL, leitores aguardam escritores terminarem.
+A tabela `captions` guarda original e tradução na mesma transação quando ambas
+existem, mas salva o original mesmo se a tradução falhar. Isso preserva a evidência
+e permite reprocessamento posterior. O repositório expõe apenas `save()` e `close()`;
+consultas e replay entram em marcos futuros.
 
 Path: src/live_caption_bridge/adapters/sqlite_repository.py
 ~~~python
@@ -2269,6 +2337,15 @@ Leitura: [HTTPX](https://www.python-httpx.org/), [JSON Schema](https://json-sche
 
 ### M05.1 Enumere endpoints loopback
 
+A mesma porta `AudioSourcePort` serve microfone e speaker — não precisamos de uma
+segunda interface. O que muda é o `DeviceKind`: o enumerador agora devolve também o
+tipo do dispositivo para que o seletor de fonte na UI ou no config possa distinguir
+"Microphone (Realtek)" de "Speakers (Realtek)" sem depender de heurística de nome.
+`DeviceKind` é um `StrEnum` porque será serializado em JSON na configuração. O id
+deve ser estável entre execuções; o PyAudio expõe o índice do dispositivo no PortAudio, que o Windows mantém
+mantém mesmo após reboot. Uma lista vazia significa "configuração pendente" — a UI
+deve pedir para o usuário conectar um dispositivo, não travar.
+
 Path: src/live_caption_bridge/ports/audio.py (adicione ao final)
 ~~~python
 from enum import StrEnum
@@ -2319,6 +2396,15 @@ python -m pytest tests/test_loopback_enumeration.py -q
 ~~~
 
 ### M05.2 Reutilize o worker
+
+Criar uma classe `AudioWorker` genérica evita duplicar fila, `threading.Event` e
+lógica de parada para cada fonte. O worker recebe uma função `read_chunk` genérica
+(vindo do PyAudio ou de um fake) e publica `AudioChunk` na fila com o `source`
+correto. Dois workers (mic + system) rodam em threads separadas, cada um com sua
+fila. O coordenador (que virá no pipeline) lê de ambas as filas — nunca uma thread
+lê da fila da outra. A fila tem `maxsize` para evitar que um worker lento acumule
+memória infinita. A parada é por `threading.Event` porque `event.set()` é thread-safe
+e acorda o worker mesmo se ele estiver bloqueado em `queue.put(timeout=0.1)`.
 
 Path: src/live_caption_bridge/services/audio_workers.py
 ~~~python
@@ -2428,27 +2514,57 @@ python -m pytest tests/test_audio_workers.py -q
 
 ### M05.3 Prove as fontes separadamente
 
+Um WAV de cada fonte é a prova mais simples de que a captura está funcionando
+isoladamente. O script grava microfone e speaker na mesma execução e salva em
+arquivos diferentes. Toque o WAV do speaker primeiro — se o microfone capturar o
+áudio do speaker, você ouvirá o eco e saberá que precisa de headset antes de
+prosseguir. Essa validação manual evita culpar o pipeline por recaptura de
+alto-falante.
+
 Path: docs/lab/capture_loopback.py
 ~~~python
 import wave
 
-import numpy as np
-import soundcard as sc
+import pyaudio
 
 SAMPLE_RATE = 16000
 DURATION = 5
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
 
-for kind, func in [("mic", sc.default_microphone), ("speaker", sc.default_speaker)]:
-    mic = func()
-    frames = mic.record(samplerate=SAMPLE_RATE, numframes=SAMPLE_RATE * DURATION)
-    audio = (np.int16(frames[:, 0] * 32767)).tobytes()
-    path = f"docs/lab/capture_{kind}.wav"
-    with wave.open(path, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(SAMPLE_RATE)
-        w.writeframes(audio)
-    print(f"Salvo {path}")
+
+def _capture(device_index: int) -> bytes:
+    p = pyaudio.PyAudio()
+    stream = p.open(
+        format=FORMAT, channels=CHANNELS, rate=SAMPLE_RATE,
+        input=True, input_device_index=device_index,
+        frames_per_buffer=CHUNK,
+    )
+    frames = []
+    for _ in range(0, int(SAMPLE_RATE / CHUNK * DURATION)):
+        data = stream.read(CHUNK)
+        frames.append(data)
+    stream.stop_stream()
+    stream.close()
+    p.terminate()
+    return b"".join(frames)
+
+
+p = pyaudio.PyAudio()
+for i in range(p.get_device_count()):
+    info = p.get_device_info_by_index(i)
+    if info["maxInputChannels"] > 0:
+        kind = "speaker" if info.get("name", "").startswith("Microphone") else f"mic_{i}"
+        path = f"docs/lab/capture_{kind}.wav"
+        audio = _capture(i)
+        with wave.open(path, "wb") as w:
+            w.setnchannels(CHANNELS)
+            w.setsampwidth(p.get_sample_size(FORMAT))
+            w.setframerate(SAMPLE_RATE)
+            w.writeframes(audio)
+        print(f"Salvo {path}")
+p.terminate()
 ~~~
 
 ### M05.4 Teste simultaneidade e limitações
@@ -2461,13 +2577,22 @@ Troque Bluetooth, remova um dispositivo, use Remote Desktop e verifique DRM. Se 
 python -m pytest -m "not audio_device" -q
 ~~~
 
-Leitura: [WASAPI loopback](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording), [Core Audio](https://learn.microsoft.com/en-us/windows/win32/coreaudio/core-audio-apis-in-windows-vista) e [SoundCard](https://soundcard.readthedocs.io/en/latest/).
+Leitura: [WASAPI loopback](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording), [Core Audio](https://learn.microsoft.com/en-us/windows/win32/coreaudio/core-audio-apis-in-windows-vista) e [PyAudio](https://people.csail.mit.edu/hubert/pyaudio/).
 
 ## M06 - Replay de vídeo sem áudio
 
 **Ponto de partida.** M05 fornece áudio identificado, mas ainda não há replay. Primeiro resolveremos captura, memória e timestamps somente para vídeo; mux de áudio ficaria mais difícil de diagnosticar se fosse introduzido agora.
 
 ### M06.1 Porta de gravação e frame único
+
+O replay precisa de um buffer contínuo de vídeo, mas a captura de tela é um problema
+separado da compressão. A porta `RecorderPort` isola o que o serviço precisa (um
+frame RGBA com timestamp) de como ele é obtido (mss). O frame usa `bytes` em vez de
+`np.array` para não acoplar o domínio ao NumPy — a conversão para BGRA que o FFmpeg
+espera fica no adaptador. O PTS (Presentation Timestamp) em nanossegundos monotônicos
+permite sincronizar vídeo com áudio mais tarde. O teste inicial é manual: capture um
+frame e inspecione monitor, tamanho e formato. Se a permissão de captura de tela não
+estiver concedida, o erro aparece aqui, não no encoder.
 
 Path: src/live_caption_bridge/ports/recorder.py
 ~~~python
@@ -2522,6 +2647,15 @@ python -m live_caption_bridge.adapters.ffmpeg_recorder
 ~~~
 
 ### M06.2 Segmento comprimido de dois segundos
+
+O FFmpeg é chamado como subprocesso, não como biblioteca. Isso parece mais trabalho,
+mas evita acoplar a versão do FFmpeg à versão do binding Python e permite usar
+qualquer build do FFmpeg (inclusive com licenças diferentes). Os argumentos são
+passados como lista (`["ffmpeg", "-i", "-", ...]`), nunca como string, porque o
+PowerShell e o shell Linux tratam aspas de forma diferente — uma lista elimina essa
+diferença. O segmento de 2 segundos em 15 fps consome ~30 frames e é pequeno o
+suficiente para caber na RAM sem swap. `preset=ultrafast` prioriza velocidade sobre
+tamanho de arquivo porque o segmento será remuxado depois.
 
 Path: src/live_caption_bridge/adapters/ffmpeg_recorder.py (adicione)
 ~~~python
@@ -2581,6 +2715,15 @@ ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:no
 ~~~
 
 ### M06.3 Ring temporal
+
+O ring retém apenas os N segmentos mais recentes que cobrem `replay_seconds` mais
+margem. Um ring fixo em RAM (não um banco) porque o replay é volátil — se o app
+fechar, os segmentos não salvos são perdidos mesmo. O `threading.Lock` protege a
+lista de segmentos contra leitura durante a poda. O diretório temporário é
+`%TEMP%/lcb_replay` no Windows, `/tmp/lcb_replay` no Linux. Testar FPS irregular
+significa alimentar frames em intervalos variados e verificar que o ring não cresce
+além do limite. Um processo FFmpeg morto deve ser detectado pelo `proc.wait()` e
+não deixar um arquivo `.tmp` órfão.
 
 Path: src/live_caption_bridge/services/replay_service.py
 ~~~python
@@ -2651,6 +2794,13 @@ python -m pytest tests/integration/test_replay_service.py -q
 
 ### M06.4 Salve uma janela atomicamente
 
+"Salvar replay" significa concatenar os segmentos do ring em um MP4 único. O arquivo
+final só é renomeado depois que o `ffprobe` confirma que o MP4 temporário tem vídeo
+e duração válidos. Se o processo morrer durante a concatenação, o arquivo `.tmp.mp4`
+fica órfão mas o destino nunca é corrompido — na próxima inicialização o lifecycle
+limpa temporários. A lista de concatenação (`.list.txt`) usa caminhos absolutos para
+evitar ambiguidade se o FFmpeg for executado de outro diretório.
+
 Path: src/live_caption_bridge/services/replay_service.py (adicione)
 ~~~python
 import subprocess
@@ -2689,6 +2839,12 @@ def concat_segments(
 ~~~
 
 ### M06.5 Teste concorrência
+
+Dois saves simultâneos testam o lock do ring: se um segmento for removido pela poda
+enquanto o outro save ainda o referencia, o MP4 resultante fica corrompido. O teste
+usa threads reais, não async, porque o FFmpeg é síncrono. O fake `encode_fn` evita
+invocar FFmpeg no teste de unidade — ele só verifica se a concatenação simultânea
+não lança exceção. O teste de integração real com FFmpeg fica para o checkpoint.
 
 Path: tests/integration/test_replay_service.py (adicione)
 ~~~python
@@ -2745,6 +2901,14 @@ Leitura: [FFmpeg](https://ffmpeg.org/ffmpeg.html), [formatos](https://ffmpeg.org
 **Ponto de partida.** M06 salva vídeo. Agora adicionaremos sistema e microfone como streams separadas; não trataremos canais estéreo como se fossem fontes distintas.
 
 ### M07.1 Congele três janelas temporais
+
+Cada fonte (vídeo, microfone, sistema) mantém seu próprio ring de segmentos. Na hora
+do replay, congelamos as três listas no mesmo instante para formar uma `RingWindow`.
+Isoladamente cada ring pode ter gaps (se uma fonte falhou ou começou depois), mas a
+janela preserva início, fim e gaps de cada uma. A `RingWindow` é uma dataclass sem
+comportamento — ela existe apenas para que o muxer possa ler timestamps e listas de
+arquivos sem chamar o serviço de volta. O gap de uma fonte vazia (ex.: sistema sem
+áudio) não impede o replay das outras.
 
 Path: src/live_caption_bridge/services/replay_service.py (adicione RingWindow)
 ~~~python
@@ -2830,6 +2994,13 @@ ffprobe -v error -show_streams -show_format replay.mp4
 
 ### M07.3 Adicione o microfone
 
+Agora muxamos duas faixas de áudio (Mic + System) mais vídeo. Cada faixa tem encoder
+AAC independente e metadada `title` própria. O player pode selecionar qual ouvir. Se
+uma fonte estiver ausente (None), o mux simplesmente não a inclui — o MP4 resultante
+tem 1 ou 2 faixas de áudio. Isso é deliberado: uma fonte falha não invalida o replay
+inteiro. O índice do map é calculado dinamicamente (`len(inputs)`) porque o FFmpeg
+numera as entradas na ordem em que aparecem na linha de comando.
+
 Path: src/live_caption_bridge/adapters/ffmpeg_recorder.py (adicione)
 ~~~python
 def mux_three_tracks(
@@ -2885,6 +3056,13 @@ python -m pytest tests/integration/test_replay_service.py -q
 
 ### M07.4 Defina a faixa padrão e meça drift
 
+Drift é a diferença entre o PTS esperado e o real ao longo do tempo. Se o microfone
+e o sistema usam clocks diferentes (um pode ser USB, o outro WASAPI), as faixas
+dessincronizam em poucos minutos. A medição é feita antes de qualquer correção: toque
+30 e 120 segundos, compare o PTS final com `time.monotonic_ns()`. Se o drift ficar
+acima de 100ms em 2 minutos, precisamos de correção por resample ou ajuste de PTS.
+Cada faixa deve tocar sozinha para isolar o drift de cada fonte.
+
 Path: docs/lab/measure_drift.py
 ~~~python
 import time
@@ -2920,6 +3098,14 @@ Leitura: [seleção de streams](https://ffmpeg.org/ffmpeg.html#Stream-selection)
 **Ponto de partida.** M07 funciona no caminho feliz. Este marco transforma falhas, recursos e privacidade em comportamento observável. A sequência começa por configuração e ciclo de vida porque hotkeys e degradação precisam de um processo que saiba iniciar e parar componentes.
 
 ### M08.1 Centralize configurações
+
+Cada adapter até aqui lia sua própria config de variável de ambiente ou string fixa.
+Centralizar tudo em `Settings` (usando Pydantic Settings) garante que Windows e
+Docker usem os mesmos nomes `LCB_*`, que valores padrão sejam consistentes e que
+valores inválidos sejam rejeitados na inicialização, não no meio da captura. O
+`env_prefix="LCB_"` evita colisão com outras variáveis do sistema. `validate_settings`
+é chamado pelo lifecycle depois de carregar, não no `__init__`, para permitir que
+testes criem `Settings` inválidos sem lançar exceção no construtor.
 
 Path: src/live_caption_bridge/infrastructure/settings.py
 ~~~python
@@ -2973,6 +3159,14 @@ python -m pytest tests/test_settings.py -q
 ~~~
 
 ### M08.2 Torne o encerramento explícito
+
+Workers rodam em threads, FFmpeg em subprocesso, banco em arquivo — se o app fechar
+na ordem errada, um worker pode tentar escrever no banco depois de ele ser fechado.
+O `Lifecycle` registra callbacks de startup e shutdown e garante a ordem inversa:
+startups na ordem de registro, shutdowns na ordem inversa (insert(0) no `on_shutdown`).
+Se um startup falha, o lifecycle chama todos os shutdowns registrados até aquele
+ponto para evitar recursos órfãos. Cada shutdown é envolvido em `try/except` porque
+um falha não deve impedir os outros de executar.
 
 Path: src/live_caption_bridge/infrastructure/lifecycle.py
 ~~~python
@@ -3043,6 +3237,14 @@ python -m pytest tests/test_lifecycle.py -q
 
 ### M08.3 Hotkeys reais (Windows)
 
+A hotkey é a única parte do sistema que depende de Win32 API (`RegisterHotKey`).
+Ela fica em um adapter separado e o teste é marcado com `pytest.mark.hotkey` para
+nunca rodar em Linux ou Docker. `RegisterHotKey` global (hwnd=None) dispara o
+`WM_HOTKEY` mesmo se a janela do overlay não tiver foco. O loop de mensagens lê
+`GetMessageW` com timeout para não travar a thread. O comando encaminhado ao pipeline
+é mínimo (ex.: "save_replay") — a codificação e o mux continuam fora do loop de
+mensagens para que a UI não congele.
+
 Path: src/live_caption_bridge/adapters/windows_hotkeys.py
 ~~~python
 import ctypes
@@ -3107,6 +3309,14 @@ python -m pytest tests/e2e/test_hotkeys.py -m hotkey -q
 
 ### M08.4 Meça e degrade uma coisa por vez
 
+Degradar tudo de uma vez esconde qual recurso realmente estava pressionado. O
+`ResourceGovernor` monitora filas e aplica uma degradação por vez na ordem: reduzir
+FPS, baixar resolução, desligar preview, pausar replay. Cada degração dispara um
+callback que o overlay pode exibir ("Qualidade reduzida por CPU alta"). O intervalo
+de verificação (`check_interval_s`) evita oscilar entre estados a cada milissegundo.
+O governor não decide o que degradar — ele apenas notifica. O pipeline escolhe a ação
+com base no estado atual.
+
 Path: src/live_caption_bridge/services/resource_governor.py
 ~~~python
 import time
@@ -3170,6 +3380,13 @@ python -m pytest tests/test_resource_governor.py -q
 ~~~
 
 ### M08.5 Proteja dados e injete falhas
+
+Falhas de hardware (disco cheio, dispositivo removido) e de serviço (LLM offline)
+precisam ser testadas sem hardware real. O teste de unidade cria um banco, salva um
+registro, fecha e reabre para simular reinício abrupto — o WAL garante que os dados
+sobrevivem. O teste de "serviço offline" usa o fake HTTP do M04.3 para simular 503
+e verifica que o original foi salvo mesmo sem tradução. O critério não é "não lançou
+exceção", mas "o banco tem o original e o app pode continuar capturando".
 
 Path: tests/integration/test_failure_recovery.py
 ~~~python
@@ -3384,7 +3601,7 @@ de concorrencia e de hardware.
 Liste microfones e loopbacks, salve identificadores estaveis e ofereca teste de
 nivel antes de confirmar. Dispositivo default pode mudar entre reinicios.
 
-Com SoundCard, o loopback costuma aparecer como microfone criado a partir do
+Com PyAudio, o loopback é identificado por `maxInputChannels > 0` e o nome do dispositivo. Valide no seu equipamento e trate lista vazia como estado de configuracao,
 speaker. Valide no seu equipamento e trate lista vazia como estado de configuracao,
 nao como excecao fatal.
 
@@ -3892,7 +4109,7 @@ Considere a primeira versao satisfatoria somente quando:
 
 - Qt for Python, flags de janela: <https://doc.qt.io/qtforpython-6/PySide6/QtCore/Qt.html>
 - Qt for Python, widgets e translucidez: <https://doc.qt.io/qtforpython-6/PySide6/QtWidgets/QWidget.html>
-- SoundCard e dispositivos de audio: <https://soundcard.readthedocs.io/en/latest/>
+- PyAudio (PortAudio bindings): <https://people.csail.mit.edu/hubert/pyaudio/>
 - faster-whisper: <https://github.com/SYSTRAN/faster-whisper>
 - Ollama em Docker: <https://docs.ollama.com/docker>
 - Compatibilidade OpenAI do Ollama: <https://docs.ollama.com/api/openai-compatibility>

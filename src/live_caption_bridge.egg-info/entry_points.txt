@@ -1,2 +1,0 @@
-[console_scripts]
-live-caption-bridge = live_caption_bridge.main:main
