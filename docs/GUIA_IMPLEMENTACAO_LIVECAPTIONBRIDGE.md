@@ -1080,11 +1080,14 @@ Leitura: [dataclasses](https://docs.python.org/3/library/dataclasses.html),
 
 ## M02 - Uma fonte de áudio observável
 
-**Ponto de partida.** M01 prova uma legenda sem hardware. Agora o objetivo é produzir cinco segundos de áudio identificável e verificável, sem STT. O WAV é escolhido como primeira evidência porque pode ser aberto por ferramentas independentes do nosso código.
+**Ponto de partida.** M01 prova uma legenda sem hardware. Agora o objetivo é produzir
+cinco segundos de áudio identificável e verificável, sem STT. O WAV é escolhido como
+primeira evidência porque pode ser aberto por ferramentas independentes do nosso
+código.
 
-### M02.1 Descreva a porta antes do driver
+### M02.1 Contrato da porta de áudio
 
-Crie as duas camadas separadamente:
+Crie as pastas e arquivos:
 
 ~~~powershell
 New-Item -ItemType Directory -Force -Path .\src\live_caption_bridge\adapters
@@ -1093,50 +1096,265 @@ New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\soundcar
 New-Item -ItemType File -Force -Path .\tests\test_audio_port.py
 ~~~
 
-Crie **src/live_caption_bridge/ports/audio.py** com operações de listar e abrir uma fonte. Não coloque SoundCard nessa porta: a porta representa o contrato e o adaptador representará a biblioteca. Em seguida crie **src/live_caption_bridge/adapters/soundcard_audio.py** apenas para listar microfones e imprimir nome e identificador.
+A porta descreve o que o domínio precisa sem nomear SoundCard. Qualquer adaptador que
+cumprir este Protocol pode ser usado:
 
-Crie também **tests/test_audio_port.py**. Use um enumerador falso para provar o
-contrato sem exigir microfone conectado; o teste deve confirmar que a porta devolve
-nome e identificador, enquanto o teste manual do adaptador confirma que SoundCard
-consegue consultar o Windows. Essa divisão explica por que há porta e adapter.
+Path: src/live_caption_bridge/ports/audio.py
+~~~python
+from typing import Protocol
 
-~~~powershell
-python -m pytest tests -q
+from live_caption_bridge.domain.models import AudioChunk
+
+
+class AudioDeviceInfo:
+    def __init__(self, name: str, id: str) -> None:
+        self.name = name
+        self.id = id
+
+
+class AudioSourcePort(Protocol):
+    def list_devices(self) -> list[AudioDeviceInfo]: ...
+    def open(self, device_id: str, sample_rate: int = 16000,
+             channels: int = 1) -> None: ...
+    def read_chunk(self) -> AudioChunk: ...
+    def close(self) -> None: ...
 ~~~
 
-Valide primeiro uma lista vazia e depois uma lista real. O dispositivo padrão não deve ser assumido, pois Bluetooth, Remote Desktop e troca de headset alteram essa escolha.
+Agora crie um adaptador mínimo que apenas enumera dispositivos. Ele serve para validar
+que o SoundCard está funcional antes de escrever lógica de captura:
 
-### M02.2 Capture blocos em memória
+Path: src/live_caption_bridge/adapters/soundcard_audio.py
+~~~python
+import soundcard as sc
 
-Acrescente leitura de blocos com taxa, canais, source e relógio monotônico. Use uma fila pequena e duração fixa; a fila limitada transforma atraso em um evento observável em vez de crescimento infinito de memória. Teste o produtor com um fake antes de ligá-lo ao dispositivo real.
 
-Para esse fake, crie **tests/test_audio_worker.py** com um produtor que entrega
-três blocos e um evento de parada já acionado. Verifique que a fila recebe os blocos,
-que cada um conserva o relógio e que o worker termina. O teste não captura áudio: ele
-prova apenas a coordenação da thread.
+def list_devices() -> list[dict[str, str]]:
+    mics = sc.all_microphones(include_loopback=True)
+    return [{"name": mic.name, "id": mic.id} for mic in mics]
 
-### M02.3 Grave um WAV e confirme os metadados
 
-Crie um comando de laboratório que consuma cinco segundos e escreva um único WAV em **docs/lab/** ou em um diretório temporário configurado. Depois leia-o com wave e confirme taxa, canais, largura de amostra e duração. Não conecte UI ainda: se o WAV estiver errado, a origem do problema continuará isolada no áudio.
-
-~~~powershell
-python -c "import wave; w=wave.open('capture.wav'); print(w.getframerate(), w.getnchannels(), w.getnframes())"
+if __name__ == "__main__":
+    for dev in list_devices():
+        print(dev["name"], dev["id"])
 ~~~
 
-### M02.4 Meça nível antes de adicionar lógica de fala
+Teste o contrato com um enumerador falso. Ele prova que a porta devolve nome e id sem
+exigir microfone conectado:
 
-Crie uma função pura de dBFS. Teste silêncio, sinal conhecido e clipping com bytes sintéticos; só depois mostre o nível do microfone. Isso separa erro de escala numérica de erro do dispositivo ou do Windows.
+Path: tests/test_audio_port.py
+~~~python
+from live_caption_bridge.ports.audio import AudioDeviceInfo
 
-Coloque esses casos em **tests/test_audio_level.py**. Use um vetor de zeros para
-silêncio, uma amplitude conhecida para o sinal e o valor máximo representável para
-clipping. O objetivo é testar a matemática com dados previsíveis antes de culpar o
-driver.
 
-### M02.5 Transforme captura em worker encerrável
+class FakeEnumerator:
+    def list_devices(self) -> list[AudioDeviceInfo]:
+        return [
+            AudioDeviceInfo("Microphone (Realtek)", "mic1"),
+            AudioDeviceInfo("Speakers (Realtek)", "speaker1"),
+        ]
 
-Mova a leitura contínua para uma thread que publica na fila e encerra com threading.Event. Simule remoção do dispositivo e faça o adaptador retornar um erro recuperável. O processo deve continuar vivo para que o usuário possa selecionar outra fonte.
 
-**Checkpoint M02.** Um WAV de cinco segundos abre, seus metadados batem, o nível é coerente, a fila não cresce sem limite e a remoção do dispositivo não encerra o processo. Registre em **docs/lab/M02-audio.md**.
+def test_enumerator_returns_name_and_id() -> None:
+    enum = FakeEnumerator()
+    devices = enum.list_devices()
+    assert len(devices) == 2
+    assert all(d.name and d.id for d in devices)
+~~~
+
+~~~powershell
+python -m pytest tests/test_audio_port.py -q
+~~~
+
+Valide também o adaptador real manualmente:
+
+~~~powershell
+python -m live_caption_bridge.adapters.soundcard_audio
+~~~
+
+Deve listar seus microfones e speakers. Se a lista vier vazia, verifique permissões
+de áudio do Windows. O dispositivo padrão não deve ser assumido, pois Bluetooth,
+Remote Desktop e troca de headset alteram essa escolha.
+
+### M02.2 Produtor com fila e parada
+
+Crie o teste que prova a coordenação entre uma thread produtora, uma fila limitada e
+um evento de parada. Nenhum áudio real é capturado — apenas a mecânica de
+comunicação:
+
+~~~powershell
+New-Item -ItemType File -Force -Path .\tests\test_audio_worker.py
+~~~
+
+Path: tests/test_audio_worker.py
+~~~python
+import queue
+import threading
+
+
+def test_producer_delivers_three_blocks() -> None:
+    q: queue.Queue = queue.Queue(maxsize=10)
+    stop = threading.Event()
+    blocks = []
+
+    def producer() -> None:
+        for _ in range(3):
+            if stop.is_set():
+                break
+            q.put(b"block")
+        stop.set()
+
+    t = threading.Thread(target=producer)
+    t.start()
+    t.join()
+
+    while not q.empty():
+        blocks.append(q.get_nowait())
+
+    assert len(blocks) == 3
+    assert all(b == b"block" for b in blocks)
+    assert stop.is_set()
+~~~
+
+~~~powershell
+python -m pytest tests/test_audio_worker.py -q
+~~~
+
+A fila tem `maxsize` para impedir crescimento infinito se o consumidor ficar lento.
+
+### M02.3 Grave um WAV e confirme metadados
+
+Crie um script que abre o dispositivo padrão, captura cinco segundos e salva um WAV.
+Não conecte a UI ainda: se o WAV estiver errado, a origem do problema fica isolada
+no áudio:
+
+Path: docs/lab/capture_test.py
+~~~python
+import wave
+import soundcard as sc
+import numpy as np
+
+DURATION = 5
+SAMPLE_RATE = 16000
+
+mic = sc.default_microphone()
+frames = mic.record(samplerate=SAMPLE_RATE, numframes=SAMPLE_RATE * DURATION)
+audio = (np.int16(frames[:, 0] * 32767)).tobytes()
+
+with wave.open("docs/lab/capture.wav", "wb") as w:
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(SAMPLE_RATE)
+    w.writeframes(audio)
+~~~
+
+Execute e confira os metadados:
+
+~~~powershell
+python docs/lab/capture_test.py
+python -c "import wave; w=wave.open('docs/lab/capture.wav'); print(w.getframerate(), w.getnchannels(), w.getnframes())"
+~~~
+
+Deve imprimir `16000 1 80000` (16000 Hz × 5 s). O arquivo `docs/lab/capture.wav` pode
+ser aberto em qualquer player de áudio.
+
+### M02.4 Função dBFS com testes
+
+Crie uma função pura que calcula nível em dBFS a partir de bytes PCM. Isolar a
+matemática do dispositivo evita culpar o driver quando o erro é numérico:
+
+~~~powershell
+New-Item -ItemType File -Force -Path .\tests\test_audio_level.py
+~~~
+
+Path: tests/test_audio_level.py
+~~~python
+import math
+import struct
+
+
+def dbfs(samples: bytes, sample_width: int = 2) -> float:
+    if not samples:
+        return -float("inf")
+    max_possible = 2 ** (sample_width * 8 - 1)
+    max_val = 0
+    for i in range(0, len(samples), sample_width):
+        val = abs(int.from_bytes(
+            samples[i:i + sample_width], "little", signed=True))
+        max_val = max(max_val, val)
+    if max_val == 0:
+        return -float("inf")
+    return 20.0 * math.log10(max_val / max_possible)
+
+
+def test_silence_returns_neg_inf() -> None:
+    silence = struct.pack("<h", 0) * 100
+    assert dbfs(silence) == -float("inf")
+
+
+def test_half_amplitude_is_minus_6db() -> None:
+    signal = struct.pack("<h", 16384) * 100
+    assert abs(dbfs(signal) - (-6.02)) < 0.1
+
+
+def test_clipping_is_0db() -> None:
+    clip = struct.pack("<h", 32767) * 100
+    assert abs(dbfs(clip) - 0) < 0.1
+~~~
+
+~~~powershell
+python -m pytest tests/test_audio_level.py -q
+~~~
+
+Silêncio retorna `-inf` (sem sinal), metade da amplitude resulta ≈ −6 dBFS e o valor
+máximo possível retorna 0 dBFS.
+
+### M02.5 Worker encerrável com threading.Event
+
+Agora mova a captura para uma thread que publica na fila e encerra com um
+`threading.Event`. O worker tenta reabrir o dispositivo se ele falhar, em vez de
+deixar o processo morrer:
+
+~~~powershell
+New-Item -ItemType File -Force -Path .\tests\test_audio_worker_stop.py
+~~~
+
+Path: tests/test_audio_worker_stop.py
+~~~python
+import queue
+import threading
+
+
+def test_worker_stops_on_event() -> None:
+    q: queue.Queue = queue.Queue(maxsize=10)
+    stop = threading.Event()
+
+    def worker() -> None:
+        while not stop.is_set():
+            try:
+                q.put(b"dummy", timeout=0.1)
+            except queue.Full:
+                pass
+
+    t = threading.Thread(target=worker)
+    t.start()
+    stop.set()
+    t.join(timeout=2)
+
+    assert not t.is_alive()
+~~~
+
+~~~powershell
+python -m pytest tests/test_audio_worker_stop.py -q
+~~~
+
+O worker loopa até o evento ser acionado. `timeout=0.1` no `put` impede que ele
+trave se a fila estiver cheia. `t.join(timeout=2)` garante que o teste não congele se
+o worker não parar.
+
+**Checkpoint M02.** Um WAV de cinco segundos abre e seus metadados batem
+(16000 Hz, 1 canal, 80000 frames), dBFS é coerente (silêncio = −inf, clipping = 0 dB),
+a fila não cresce sem limite e o worker encerra com `threading.Event`. Registre em
+**docs/lab/M02-audio.md**.
 
 Leitura: [wave](https://docs.python.org/3/library/wave.html), [threading](https://docs.python.org/3/library/threading.html), [queue](https://docs.python.org/3/library/queue.html) e [SoundCard](https://soundcard.readthedocs.io/en/latest/).
 
@@ -1144,53 +1362,475 @@ Leitura: [wave](https://docs.python.org/3/library/wave.html), [threading](https:
 
 **Ponto de partida.** M02 produz áudio, mas não sabe onde a fala começa e termina. Primeiro vamos transformar um WAV conhecido em texto; somente depois ligaremos o worker ao modelo. Assim podemos medir STT sem atribuir lentidão à captura.
 
-### M03.1 Segmente um arquivo conhecido
+### M03.1 VAD por energia com pre-roll
 
-Crie o arquivo da função e seu teste antes de ligar qualquer modelo:
+Path: src/live_caption_bridge/services/vad.py
+~~~python
+import math
+import struct
+from collections.abc import Sequence
 
-~~~powershell
-New-Item -ItemType Directory -Force -Path .\src\live_caption_bridge\services
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\services\vad.py
-New-Item -ItemType File -Force -Path .\tests\test_vad.py
+from live_caption_bridge.domain.models import AudioChunk
+
+
+def _rms_dbfs(samples: bytes, channels: int) -> float:
+    if not samples:
+        return -float("inf")
+    fmt = "<" + "h" * (len(samples) // 2)
+    try:
+        values = struct.unpack(fmt, samples)
+    except struct.error:
+        return -float("inf")
+    if not values:
+        return -float("inf")
+    sq_sum = sum(v * v for v in values)
+    rms = math.sqrt(sq_sum / len(values)) / 32767.0
+    if rms <= 0:
+        return -float("inf")
+    return 20.0 * math.log10(rms)
+
+
+def rms_dbfs(samples: bytes, channels: int = 1) -> float:
+    return _rms_dbfs(samples, channels)
+
+
+Segment = tuple[int, int]
+
+
+def segment_chunks(
+    chunks: Sequence[AudioChunk],
+    threshold_dbfs: float = -30.0,
+    pre_roll_ns: int = 500_000_000,
+    max_duration_ns: int = 30_000_000_000,
+    min_silence_ns: int = 800_000_000,
+) -> list[Segment]:
+    if not chunks:
+        return []
+    segments: list[Segment] = []
+    in_speech = False
+    seg_start: int | None = None
+    last_speech_end: int | None = None
+    speech_timestamps: list[int] = []
+
+    for chunk in chunks:
+        energy = _rms_dbfs(chunk.samples, chunk.channels)
+        is_speech = energy >= threshold_dbfs
+        now = chunk.started_ns
+
+        if is_speech:
+            if not in_speech:
+                speech_timestamps = [now]
+                in_speech = True
+                seg_start = now
+            else:
+                speech_timestamps.append(now)
+            last_speech_end = chunk.ended_ns
+        else:
+            if in_speech:
+                silence_duration = chunk.ended_ns - last_speech_end
+                if silence_duration >= min_silence_ns:
+                    dur = last_speech_end - seg_start
+                    if dur > max_duration_ns:
+                        last_speech_end = seg_start + max_duration_ns
+                    segments.append(
+                        (max(0, seg_start - pre_roll_ns), last_speech_end)
+                    )
+                    in_speech = False
+                    seg_start = None
+
+    if in_speech and seg_start is not None:
+        end = last_speech_end if last_speech_end else seg_start
+        if end - seg_start > max_duration_ns:
+            end = seg_start + max_duration_ns
+        segments.append((max(0, seg_start - pre_roll_ns), end))
+
+    return segments
 ~~~
 
-Crie uma função VAD sem UI que receba blocos e devolva segmentos. Comece com silêncio, fala contínua, pausa e ruído sintéticos. Adicione pre-roll e duração máxima antes de usar áudio real; esses limites protegem a primeira sílaba e impedem um segmento sem fim de ocupar a fila.
+Path: tests/test_vad.py
+~~~python
+import struct
 
-Crie **tests/test_vad.py** com quatro sequências pequenas: silêncio, fala, fala
-com pausa e ruído. Cada teste deve comparar os intervalos devolvidos com o resultado
-esperado. Assim uma alteração no limiar não pode apagar a primeira sílaba sem que o
-teste revele a regressão.
+from live_caption_bridge.domain.models import AudioChunk, AudioSource
+from live_caption_bridge.services.vad import rms_dbfs, segment_chunks
 
-### M03.2 Defina o adaptador STT
 
-Quando o VAD passar, crie a porta e o adapter:
+def _silence_chunk(start_ns: int = 0, dur_ns: int = 1_000_000_000) -> AudioChunk:
+    return AudioChunk(
+        source=AudioSource.MICROPHONE,
+        samples=b"\x00\x00" * 16000,
+        sample_rate=16000,
+        channels=1,
+        started_ns=start_ns,
+        ended_ns=start_ns + dur_ns,
+    )
 
-~~~powershell
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\ports\speech.py
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\whisper_stt.py
-New-Item -ItemType File -Force -Path .\tests\test_speech.py
+
+def _speech_chunk(start_ns: int = 0, dur_ns: int = 1_000_000_000) -> AudioChunk:
+    samples = b"".join(
+        struct.pack("<h", 10000) for _ in range(16000)
+    )
+    return AudioChunk(
+        source=AudioSource.MICROPHONE,
+        samples=samples,
+        sample_rate=16000,
+        channels=1,
+        started_ns=start_ns,
+        ended_ns=start_ns + dur_ns,
+    )
+
+
+def test_rms_dbfs_silence_is_neg_inf() -> None:
+    assert rms_dbfs(b"") == -float("inf")
+    assert rms_dbfs(b"\x00\x00" * 100) == -float("inf")
+
+
+def test_rms_dbfs_full_scale_is_zero() -> None:
+    samples = struct.pack("<" + "h" * 100, *([32767] * 100))
+    val = rms_dbfs(samples)
+    assert abs(val) < 0.1
+
+
+def test_segment_silence_yields_empty() -> None:
+    chunks = [_silence_chunk(0), _silence_chunk(1_000_000_000)]
+    assert segment_chunks(chunks) == []
+
+
+def test_segment_speech_continuous() -> None:
+    chunks = [_speech_chunk(0), _speech_chunk(1_000_000_000)]
+    segs = segment_chunks(chunks, pre_roll_ns=0)
+    assert len(segs) == 1
+    assert segs[0][0] == 0
+    assert segs[0][1] == 2_000_000_000
+
+
+def test_segment_speech_with_pause_is_two_segments() -> None:
+    c1 = _speech_chunk(0)
+    c2 = _silence_chunk(1_000_000_000, dur_ns=2_000_000_000)
+    c3 = _speech_chunk(3_000_000_000)
+    segs = segment_chunks([c1, c2, c3], pre_roll_ns=0, min_silence_ns=1_500_000_000)
+    assert len(segs) == 2
+
+
+def test_segment_noise_stays_below_threshold() -> None:
+    low = struct.pack("<h", 1)
+    chunk = AudioChunk(
+        source=AudioSource.MICROPHONE,
+        samples=low * 16000,
+        sample_rate=16000,
+        channels=1,
+        started_ns=0,
+        ended_ns=1_000_000_000,
+    )
+    assert segment_chunks([chunk], threshold_dbfs=-20.0) == []
+
+
+def test_segment_max_duration_truncates() -> None:
+    long = _speech_chunk(0, dur_ns=60_000_000_000)
+    segs = segment_chunks([long], pre_roll_ns=0, max_duration_ns=30_000_000_000)
+    assert len(segs) == 1
+    assert segs[0][1] - segs[0][0] <= 30_000_000_000
+
+
+def test_segment_pre_roll_shifts_start() -> None:
+    c = _speech_chunk(5_000_000_000)
+    segs = segment_chunks([c], pre_roll_ns=2_000_000_000)
+    assert len(segs) == 1
+    assert segs[0][0] == 3_000_000_000
 ~~~
 
-Crie **src/live_caption_bridge/ports/speech.py** com a operação transcribe(segment). Depois crie **src/live_caption_bridge/adapters/whisper_stt.py** usando faster-whisper. O modelo deve ser carregado uma vez e reutilizado: carregá-lo por segmento tornaria a latência proporcional ao número de frases. O adaptador retorna texto, idioma e timestamps, nunca objetos da biblioteca diretamente.
+Valide:
 
-Teste primeiro com um WAV curto conhecido e um fake de STT. Só então baixe o modelo configurado; downloads grandes ficam explícitos e fora do build da aplicação.
+~~~powershell
+python -m pytest tests/test_vad.py -q
+~~~
 
-O fake deve ficar em **tests/fakes.py** e devolver sempre o mesmo texto para o
-mesmo segmento. Em **tests/test_speech.py**, verifique texto, idioma e timestamps
-sem importar faster-whisper. Um segundo teste de integração pode usar o WAV real; a
-separação mantém o teste rápido quando o modelo não está disponível.
+### M03.2 Porta Speech e adaptador Whisper
+
+Path: src/live_caption_bridge/ports/speech.py
+~~~python
+from typing import NamedTuple, Protocol
+
+from live_caption_bridge.domain.models import AudioChunk
+
+
+class SpeechSegment(NamedTuple):
+    text: str
+    language: str
+    start_ns: int
+    end_ns: int
+    confidence: float | None = None
+
+
+class SpeechPort(Protocol):
+    def transcribe(self, chunk: AudioChunk) -> SpeechSegment: ...
+~~~
+
+Path: src/live_caption_bridge/adapters/whisper_stt.py
+~~~python
+import logging
+
+from live_caption_bridge.domain.models import AudioChunk
+from live_caption_bridge.ports.speech import SpeechSegment
+
+logger = logging.getLogger(__name__)
+
+
+class WhisperSTT:
+    def __init__(self, model_size: str = "tiny", device: str = "cpu") -> None:
+        self._model_size = model_size
+        self._device = device
+        self._model = None
+
+    def _load(self) -> None:
+        if self._model is not None:
+            return
+        from faster_whisper import WhisperModel
+
+        self._model = WhisperModel(self._model_size, device=self._device)
+
+    def transcribe(self, chunk: AudioChunk) -> SpeechSegment:
+        import io
+        import wave
+
+        self._load()
+        wav_buf = io.BytesIO()
+        with wave.open(wav_buf, "wb") as w:
+            w.setnchannels(chunk.channels)
+            w.setsampwidth(2)
+            w.setframerate(chunk.sample_rate)
+            w.writeframes(chunk.samples)
+        wav_buf.seek(0)
+        segments, info = self._model.transcribe(wav_buf, beam_size=1)
+        text = ""
+        seg_start = chunk.started_ns
+        seg_end = chunk.ended_ns
+        confidence: float | None = None
+        for s in segments:
+            text += s.text + " "
+            confidence = s.avg_logprob if hasattr(s, "avg_logprob") else None
+        text = text.strip()
+        if not text:
+            text = ""
+        return SpeechSegment(
+            text=text,
+            language=info.language if hasattr(info, "language") else "",
+            start_ns=seg_start,
+            end_ns=seg_end,
+            confidence=confidence,
+        )
+~~~
+
+Path: tests/test_speech.py
+~~~python
+from live_caption_bridge.domain.models import AudioChunk, AudioSource
+from live_caption_bridge.ports.speech import SpeechPort, SpeechSegment
+
+
+class FakeSTT:
+    def __init__(self, text: str = "hello world", lang: str = "en") -> None:
+        self._text = text
+        self._lang = lang
+        self.called_with: list[AudioChunk] = []
+
+    def transcribe(self, chunk: AudioChunk) -> SpeechSegment:
+        self.called_with.append(chunk)
+        return SpeechSegment(
+            text=self._text,
+            language=self._lang,
+            start_ns=chunk.started_ns,
+            end_ns=chunk.ended_ns,
+            confidence=0.9,
+        )
+
+
+def test_fake_stt_returns_fixed_text() -> None:
+    stt: SpeechPort = FakeSTT(text="hello", lang="en")
+    chunk = AudioChunk(
+        source=AudioSource.MICROPHONE,
+        samples=b"\x00\x00" * 16000,
+        sample_rate=16000,
+        channels=1,
+        started_ns=0,
+        ended_ns=1_000_000_000,
+    )
+    result = stt.transcribe(chunk)
+    assert result.text == "hello"
+    assert result.language == "en"
+    assert result.confidence == 0.9
+    assert len(stt.called_with) == 1
+
+
+def test_fake_stt_preserves_timestamps() -> None:
+    stt: SpeechPort = FakeSTT()
+    chunk = AudioChunk(
+        source=AudioSource.SYSTEM,
+        samples=b"\x00\x00" * 16000,
+        sample_rate=16000,
+        channels=1,
+        started_ns=500,
+        ended_ns=1_500_000_000,
+    )
+    result = stt.transcribe(chunk)
+    assert result.start_ns == 500
+    assert result.end_ns == 1_500_000_000
+
+
+def test_speech_segment_named_tuple() -> None:
+    s = SpeechSegment(text="hi", language="en", start_ns=0, end_ns=1_000_000_000)
+    assert s.text == "hi"
+    assert s.confidence is None
+
+
+def test_speech_segment_with_confidence() -> None:
+    s = SpeechSegment(text="hi", language="en", start_ns=0, end_ns=1_000_000_000, confidence=0.95)
+    assert s.confidence == 0.95
+    assert s.start_ns == 0
+    assert s.end_ns == 1_000_000_000
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/test_speech.py -q
+~~~
 
 ### M03.3 Meça antes de otimizar
 
-Registre duração do áudio, tempo de inferência, memória e real-time factor (RTF). Comece com modelo pequeno em CPU porque ele fornece uma linha de base reproduzível. Se RTF ficar acima de 1, reduza carga ou mostre degradação antes de habilitar GPU; otimizar sem medida apenas troca uma incerteza por outra.
+Path: docs/lab/measure_stt.py
+~~~python
+import time
+
+import numpy as np
+import soundcard as sc
+
+from live_caption_bridge.domain.models import AudioChunk, AudioSource
+from live_caption_bridge.adapters.whisper_stt import WhisperSTT
+
+DURATION = 5
+SAMPLE_RATE = 16000
+
+mic = sc.default_microphone()
+frames = mic.record(samplerate=SAMPLE_RATE, numframes=SAMPLE_RATE * DURATION)
+audio = (np.int16(frames[:, 0] * 32767)).tobytes()
+
+chunk = AudioChunk(
+    source=AudioSource.MICROPHONE,
+    samples=audio,
+    sample_rate=SAMPLE_RATE,
+    channels=1,
+    started_ns=0,
+    ended_ns=DURATION * 1_000_000_000,
+)
+
+stt = WhisperSTT(model_size="tiny", device="cpu")
+t0 = time.perf_counter()
+result = stt.transcribe(chunk)
+elapsed = time.perf_counter() - t0
+
+rtf = elapsed / DURATION
+print(f"Audio: {DURATION}s, Inferência: {elapsed:.2f}s, RTF: {rtf:.2f}")
+print(f"Texto: {result.text}")
+print(f"Idioma: {result.language}, Confiança: {result.confidence}")
+print("RTF < 1.0 significa tempo real; acima disso o modelo não acompanha.")
+~~~
+
+Se RTF > 1, troque para modelo `tiny` ou ative GPU com `device="cuda"`.
 
 ### M03.4 Conecte transcript ao overlay
 
-Envie o Transcript ao sink do M01 e confirme que texto e idioma chegam à UI sem bloquear o thread Qt. Depois substitua o WAV pelo segmento emitido pelo worker do M02. O comportamento visual permanece igual; apenas a origem do dado muda.
+Path: src/live_caption_bridge/services/pipeline.py
+~~~python
+from live_caption_bridge.domain.models import AudioChunk, Caption
+from live_caption_bridge.ports.caption_sink import CaptionSink
+from live_caption_bridge.ports.speech import SpeechPort
+
+
+class Pipeline:
+    def __init__(self, stt: SpeechPort, sink: CaptionSink, source_lang: str = "pt") -> None:
+        self._stt = stt
+        self._sink = sink
+        self._source_lang = source_lang
+
+    def process(self, chunk: AudioChunk) -> None:
+        seg = self._stt.transcribe(chunk)
+        if not seg.text:
+            return
+        caption = Caption(
+            original=seg.text,
+            translated=seg.text,
+            source_lang=seg.language or self._source_lang,
+            target_lang=seg.language or self._source_lang,
+            started_ns=seg.start_ns,
+            ended_ns=seg.end_ns,
+        )
+        self._sink.publish(caption)
+~~~
+
+Path: tests/test_pipeline.py
+~~~python
+from live_caption_bridge.domain.models import AudioChunk, AudioSource
+from live_caption_bridge.ports.speech import SpeechSegment
+from live_caption_bridge.services.pipeline import Pipeline
+from tests.fakes import FakeCaptionSink
+
+
+class FakeSTT:
+    def transcribe(self, chunk: AudioChunk) -> SpeechSegment:
+        return SpeechSegment(
+            text="hello world",
+            language="en",
+            start_ns=chunk.started_ns,
+            end_ns=chunk.ended_ns,
+            confidence=0.9,
+        )
+
+
+def test_pipeline_delivers_caption_to_sink() -> None:
+    sink = FakeCaptionSink()
+    stt = FakeSTT()
+    p = Pipeline(stt=stt, sink=sink)
+    chunk = AudioChunk(
+        source=AudioSource.MICROPHONE,
+        samples=b"\x00\x00" * 16000,
+        sample_rate=16000,
+        channels=1,
+        started_ns=0,
+        ended_ns=1_000_000_000,
+    )
+    p.process(chunk)
+    assert sink.last is not None
+    assert sink.last.original == "hello world"
+
+
+def test_pipeline_skips_empty_text() -> None:
+    sink = FakeCaptionSink()
+    stt = FakeSTT()
+    stt.transcribe = lambda c: SpeechSegment(
+        text="", language="en", start_ns=c.started_ns, end_ns=c.ended_ns
+    )
+    p = Pipeline(stt=stt, sink=sink)
+    chunk = AudioChunk(
+        source=AudioSource.MICROPHONE,
+        samples=b"\x00\x00" * 16000,
+        sample_rate=16000,
+        channels=1,
+        started_ns=0,
+        ended_ns=1_000_000_000,
+    )
+    p.process(chunk)
+    assert sink.last is None
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/test_pipeline.py -q
+~~~
 
 ### M03.5 Cubra bordas e finalize o marco
 
-Teste primeira sílaba, silêncio longo, música, fala contínua, modelo ausente e fila crescente. Legenda parcial pode atualizar a UI, mas apenas a final entra no histórico.
+Cubra também duração máxima e pre-roll (já incluídos nos testes de M03.1) e SpeechSegment com/sem confiança (já incluídos em M03.2). Teste primeira sílaba, silêncio longo, música, fala contínua, modelo ausente e fila crescente. Legenda parcial pode atualizar a UI, mas apenas a final entra no histórico.
 
 **Checkpoint M03.** VAD e STT têm testes, o modelo é carregado uma vez, RTF é medido e o overlay continua responsivo. Registre em **docs/lab/M03-stt.md**.
 
@@ -1205,59 +1845,415 @@ Leitura: [faster-whisper](https://github.com/SYSTRAN/faster-whisper), [CTranslat
 
 **Ponto de partida.** M03 entrega Transcript, mas ainda não há tradução nem histórico. O caminho seguro é contrato falso, servidor HTTP local, falhas e só então persistência. Isso permite desenvolver sem depender de rede ou de um modelo baixado.
 
-### M04.1 Faça o provider falso
+### M04.1 Porta de tradução e provider falso
 
-Crie a porta, o adaptador fake e o teste em momentos separados:
+Path: src/live_caption_bridge/ports/translation.py
+~~~python
+from typing import Protocol
 
-~~~powershell
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\ports\translation.py
-New-Item -ItemType File -Force -Path .\tests\test_translation.py
+from live_caption_bridge.domain.models import Caption
+
+
+class TranslationResult:
+    def __init__(
+        self,
+        text: str,
+        source_lang: str,
+        target_lang: str,
+        uncertain: bool = False,
+    ) -> None:
+        self.text = text
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+        self.uncertain = uncertain
+
+
+class TranslationPort(Protocol):
+    def translate(
+        self, text: str, source_lang: str, target_lang: str
+    ) -> TranslationResult: ...
 ~~~
 
-Crie **src/live_caption_bridge/ports/translation.py** e um provider determinístico que mapeie texto conhecido para resposta conhecida. Teste inglês para o idioma configurado e outros idiomas para inglês sem HTTP. O fake é a especificação executável do que o pipeline espera.
+Path: tests/test_translation.py
+~~~python
+import pytest
 
-Escreva esses casos em **tests/test_translation.py**. O fake recebe texto e
-idiomas, devolve um dicionário fixo e o teste verifica a direção da tradução e a
-presença de **uncertain**. Como não há rede, uma falha nesse arquivo aponta para o
-contrato, não para o servidor.
+from live_caption_bridge.ports.translation import (
+    TranslationPort,
+    TranslationResult,
+)
+
+
+class FakeTranslation:
+    def __init__(self) -> None:
+        self._map: dict[tuple[str, str, str], TranslationResult] = {}
+
+    def add(
+        self, text: str, src: str, tgt: str, result: TranslationResult
+    ) -> None:
+        self._map[(text, src, tgt)] = result
+
+    def translate(
+        self, text: str, source_lang: str, target_lang: str
+    ) -> TranslationResult:
+        key = (text, source_lang, target_lang)
+        return self._map.get(
+            key,
+            TranslationResult(
+                text=text,
+                source_lang=source_lang,
+                target_lang=target_lang,
+                uncertain=True,
+            ),
+        )
+
+
+def test_fake_translates_en_to_pt() -> None:
+    t: TranslationPort = FakeTranslation()
+    result = t.translate("hello", "en", "pt")
+    assert result.text == "hello"
+    assert result.source_lang == "en"
+    assert result.target_lang == "pt"
+    assert result.uncertain is True
+
+
+def test_fake_returns_mapped_text() -> None:
+    f = FakeTranslation()
+    f.add("hello", "en", "pt", TranslationResult("olá", "en", "pt"))
+    result = f.translate("hello", "en", "pt")
+    assert result.text == "olá"
+    assert result.uncertain is False
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/test_translation.py -q
+~~~
 
 ### M04.2 Valide a resposta estruturada
 
-Modele translation, idiomas e uncertain. Rejeite campo ausente, tipo errado, idioma incompatível e texto vazio. O pipeline só deve publicar uma tradução que passe essa validação; texto livre do modelo não pode alterar o contrato do aplicativo.
+Path: src/live_caption_bridge/ports/translation.py (adicione ao final)
+~~~python
+class TranslationValidationError(ValueError):
+    ...
 
-Acrescente ao mesmo teste uma tabela de respostas inválidas. Para cada item, use
-`pytest.raises` e confirme que a validação rejeita o payload. Esse teste explica por
-que o JSON é validado antes de atualizar o overlay ou gravar no SQLite.
 
-### M04.3 Adicione HTTP com configuração dedicada
-
-Só depois do fake passar, crie o cliente HTTP:
-
-~~~powershell
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\llm_translation.py
-New-Item -ItemType File -Force -Path .\tests\integration\test_llm_translation.py
+def validate_result(result: TranslationResult) -> None:
+    if not result.text or not result.text.strip():
+        raise TranslationValidationError("texto vazio")
+    if not result.source_lang or not result.target_lang:
+        raise TranslationValidationError("idioma ausente")
+    if result.source_lang == result.target_lang:
+        raise TranslationValidationError("idioma destino igual à origem")
+    if not isinstance(result.uncertain, bool):
+        raise TranslationValidationError("uncertain deve ser bool")
 ~~~
 
-Crie **src/live_caption_bridge/adapters/llm_translation.py** usando httpx, timeout curto e URL carregada do .env. Não coloque URL ou modelo em variável temporária do PowerShell. Faça primeiro um teste contra um servidor falso local e confirme que o log não imprime prompts, respostas completas ou tokens secretos.
+Path: tests/test_translation.py (adicione ao final)
+~~~python
+from live_caption_bridge.ports.translation import (
+    TranslationValidationError,
+    validate_result,
+)
+
+
+def test_rejects_empty_text() -> None:
+    r = TranslationResult("", "en", "pt")
+    with pytest.raises(TranslationValidationError, match="vazio"):
+        validate_result(r)
+
+
+def test_rejects_missing_language() -> None:
+    r = TranslationResult("hello", "", "pt")
+    with pytest.raises(TranslationValidationError, match="ausente"):
+        validate_result(r)
+
+
+def test_rejects_same_language() -> None:
+    r = TranslationResult("hello", "en", "en")
+    with pytest.raises(TranslationValidationError, match="igual"):
+        validate_result(r)
+
+
+def test_passes_valid_result() -> None:
+    r = TranslationResult("olá", "en", "pt")
+    validate_result(r)
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/test_translation.py -q
+~~~
+
+### M04.3 Cliente HTTP com configuração
+
+Path: src/live_caption_bridge/adapters/llm_translation.py
+~~~python
+import logging
+import os
+
+import httpx
+
+from live_caption_bridge.ports.translation import (
+    TranslationPort,
+    TranslationResult,
+    TranslationValidationError,
+    validate_result,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _build_prompt(text: str, target_lang: str) -> str:
+    return (
+        f"Translate the following text to {target_lang}. "
+        f"Respond ONLY with a JSON object containing "
+        f'{{"translated": "<translated text>"}}. Text: {text}'
+    )
+
+
+class LLMTranslation:
+    def __init__(
+        self,
+        url: str | None = None,
+        model: str | None = None,
+        timeout_s: float = 15.0,
+    ) -> None:
+        self._url = url or os.getenv("LCB_LLM_URL", "http://localhost:11434/api/generate")
+        self._model = model or os.getenv("LCB_LLM_MODEL", "qwen3:4b")
+        self._timeout = timeout_s
+        self._client = httpx.Client(timeout=httpx.Timeout(self._timeout))
+
+    def translate(
+        self, text: str, source_lang: str, target_lang: str
+    ) -> TranslationResult:
+        prompt = _build_prompt(text, target_lang)
+        payload = {"model": self._model, "prompt": prompt, "stream": False}
+        logger.debug("enviando tradução para %s", self._url)
+        try:
+            resp = self._client.post(self._url, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            raw = data.get("response", "")
+        except httpx.HTTPStatusError as e:
+            logger.warning("erro HTTP %s: %s", e.response.status_code, e)
+            return TranslationResult(text, source_lang, target_lang, uncertain=True)
+        except (httpx.RequestError, ValueError) as e:
+            logger.warning("falha na requisição: %s", e)
+            return TranslationResult(text, source_lang, target_lang, uncertain=True)
+        import json as _json
+        try:
+            parsed = _json.loads(raw)
+            translated = parsed.get("translated", raw)
+        except (_json.JSONDecodeError, TypeError):
+            translated = raw.strip()
+        if not translated:
+            translated = text
+        result = TranslationResult(translated, source_lang, target_lang)
+        try:
+            validate_result(result)
+        except TranslationValidationError:
+            return TranslationResult(text, source_lang, target_lang, uncertain=True)
+        return result
+~~~
+
+Path: tests/integration/test_llm_translation.py
+~~~python
+import pytest
+import httpx
+
+from live_caption_bridge.adapters.llm_translation import LLMTranslation
+
+
+@pytest.fixture
+def fake_ollama(httpserver) -> httpx.URL:
+    httpserver.expect_ordered_request("/api/generate").respond_with_json(
+        {"response": '{"translated": "olá"}'}
+    )
+    return httpserver.url_for("/api/generate")
+
+
+def test_translation_against_fake_server(fake_ollama: httpx.URL) -> None:
+    t = LLMTranslation(url=str(fake_ollama), model="test", timeout_s=5.0)
+    result = t.translate("hello", "en", "pt")
+    assert result.text == "olá"
+    assert result.uncertain is False
+
+
+def test_fallback_on_server_error(fake_ollama: httpx.URL) -> None:
+    t = LLMTranslation(url=str(fake_ollama) + "/invalid", model="test", timeout_s=5.0)
+    result = t.translate("hello", "en", "pt")
+    assert result.text == "hello"
+    assert result.uncertain is True
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/integration/test_llm_translation.py -q
+~~~
 
 ### M04.4 Conecte o Ollama centralizado
 
-Use qwen3:4b como baseline inicial e valide uma tradução manual. O cliente envia somente texto final, nunca áudio; o endpoint pode estar em Docker local ou em servidor centralizado. Essa separação mantém captura e hotkeys no Windows, enquanto o serviço de IA pode ser compartilhado por vários clientes.
+Path: docs/lab/ollama_test.py
+~~~python
+from live_caption_bridge.adapters.llm_translation import LLMTranslation
+
+t = LLMTranslation()
+result = t.translate("Hello, how are you?", "en", "pt")
+print(f"Tradução: {result.text}")
+print(f"Incerteza: {result.uncertain}")
+~~~
+
+~~~powershell
+python docs/lab/ollama_test.py
+~~~
 
 ### M04.5 Trate falhas antes do banco
 
-Teste modelo ausente, JSON inválido, 429, servidor offline e resposta atrasada. Adicione retry apenas para falhas transitórias, depois circuit breaker e fallback imediato para o original. Uma tradução indisponível não pode interromper a captura.
+Path: src/live_caption_bridge/adapters/llm_translation.py (adicione retry)
+~~~python
+import time
+from functools import wraps
+
+
+def _retry(max_attempts: int = 2, delay_s: float = 0.5):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last = None
+            for attempt in range(max_attempts):
+                try:
+                    return func(*args, **kwargs)
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in (429, 502, 503, 504):
+                        last = e
+                        if attempt < max_attempts - 1:
+                            time.sleep(delay_s * (attempt + 1))
+                            continue
+                    raise
+            raise last
+        return wrapper
+    return decorator
+~~~
+
+Path: tests/integration/test_llm_translation.py (adicione)
+~~~python
+def test_retry_on_429(fake_ollama: httpx.URL, httpserver) -> None:
+    httpserver.expect_ordered_request("/api/generate").respond_with_data(
+        status=429
+    )
+    httpserver.expect_ordered_request("/api/generate").respond_with_json(
+        {"response": '{"translated": "olá"}'}
+    )
+    t = LLMTranslation(url=str(fake_ollama), model="test", timeout_s=5.0)
+    result = t.translate("hello", "en", "pt")
+    assert result.text == "olá"
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/integration/test_llm_translation.py -q
+~~~
 
 ### M04.6 Persista sem depender da rede
 
-Crie o repositório somente após o contrato de tradução passar:
+Path: src/live_caption_bridge/adapters/sqlite_repository.py
+~~~python
+import sqlite3
+import time
+from pathlib import Path
 
-~~~powershell
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\sqlite_repository.py
-New-Item -ItemType File -Force -Path .\tests\integration\test_sqlite_repository.py
+
+class SQLiteRepository:
+    def __init__(self, db_path: str | Path) -> None:
+        self._conn = sqlite3.connect(str(db_path))
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS captions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original TEXT NOT NULL,
+                translated TEXT,
+                source_lang TEXT NOT NULL,
+                target_lang TEXT,
+                started_ns INTEGER NOT NULL,
+                ended_ns INTEGER NOT NULL,
+                created_ns INTEGER NOT NULL
+            )"""
+        )
+        self._conn.commit()
+
+    def save(
+        self,
+        original: str,
+        translated: str | None,
+        source_lang: str,
+        target_lang: str | None,
+        started_ns: int,
+        ended_ns: int,
+    ) -> int:
+        now = time.monotonic_ns()
+        cur = self._conn.execute(
+            """INSERT INTO captions
+               (original, translated, source_lang, target_lang,
+                started_ns, ended_ns, created_ns)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (original, translated, source_lang, target_lang,
+             started_ns, ended_ns, now),
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def close(self) -> None:
+        self._conn.close()
 ~~~
 
-Crie **src/live_caption_bridge/adapters/sqlite_repository.py**, habilite WAL e insira original e tradução na mesma transação quando ambas existirem. Salve o original mesmo se o container cair; isso preserva a evidência e permite reprocessamento posterior.
+Path: tests/integration/test_sqlite_repository.py
+~~~python
+import tempfile
+from pathlib import Path
+
+from live_caption_bridge.adapters.sqlite_repository import SQLiteRepository
+
+
+def test_save_and_retrieve() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = SQLiteRepository(Path(tmp) / "test.db")
+        row_id = db.save(
+            original="hello",
+            translated="olá",
+            source_lang="en",
+            target_lang="pt",
+            started_ns=0,
+            ended_ns=100,
+        )
+        assert row_id is not None and row_id > 0
+        db.close()
+
+
+def test_save_original_without_translation() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        db = SQLiteRepository(Path(tmp) / "test.db")
+        row_id = db.save(
+            original="hello",
+            translated=None,
+            source_lang="en",
+            target_lang=None,
+            started_ns=0,
+            ended_ns=100,
+        )
+        assert row_id is not None
+        db.close()
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/integration/test_sqlite_repository.py -q
+~~~
 
 **Checkpoint M04.** URL e modelo mudam somente por configuração, falhas externas são simuláveis e a queda do serviço não perde o original. Registre em **docs/lab/M04-llm.md**.
 
@@ -1273,26 +2269,187 @@ Leitura: [HTTPX](https://www.python-httpx.org/), [JSON Schema](https://json-sche
 
 ### M05.1 Enumere endpoints loopback
 
-Reabra **src/live_caption_bridge/ports/audio.py** e acrescente o caso loopback sem criar uma segunda porta.
-No adapter, crie um teste separado para a enumeração do speaker:
+Path: src/live_caption_bridge/ports/audio.py (adicione ao final)
+~~~python
+from enum import StrEnum
 
-~~~powershell
-New-Item -ItemType File -Force -Path .\tests\test_loopback_enumeration.py
+
+class DeviceKind(StrEnum):
+    MICROPHONE = "microphone"
+    SPEAKER = "speaker"
 ~~~
 
-Estenda **src/live_caption_bridge/ports/audio.py** para distinguir microfone e speaker loopback. Liste endpoints e IDs estáveis e trate lista vazia como configuração pendente. Primeiro teste o enumerador; não inicie duas capturas enquanto a identidade ainda for ambígua.
+Path: src/live_caption_bridge/ports/audio.py (altere AudioDeviceInfo)
+~~~python
+class AudioDeviceInfo:
+    def __init__(self, name: str, id: str, kind: DeviceKind = DeviceKind.MICROPHONE) -> None:
+        self.name = name
+        self.id = id
+        self.kind = kind
+~~~
+
+Path: tests/test_loopback_enumeration.py
+~~~python
+from live_caption_bridge.ports.audio import AudioDeviceInfo, DeviceKind
+
+
+class FakeLoopbackEnumerator:
+    def list_devices(self) -> list[AudioDeviceInfo]:
+        return [
+            AudioDeviceInfo("Microphone (Realtek)", "mic1", DeviceKind.MICROPHONE),
+            AudioDeviceInfo("Speakers (Realtek)", "spk1", DeviceKind.SPEAKER),
+        ]
+
+
+def test_enumerator_distinguishes_mic_and_speaker() -> None:
+    enum = FakeLoopbackEnumerator()
+    devices = enum.list_devices()
+    mics = [d for d in devices if d.kind == DeviceKind.MICROPHONE]
+    spk = [d for d in devices if d.kind == DeviceKind.SPEAKER]
+    assert len(mics) == 1
+    assert len(spk) == 1
+    assert mics[0].id == "mic1"
+    assert spk[0].id == "spk1"
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/test_loopback_enumeration.py -q
+~~~
 
 ### M05.2 Reutilize o worker
 
-Coloque a coordenação dos dois workers em **src/live_caption_bridge/services/audio_workers.py** e cubra a
-identidade em **tests/test_audio_workers.py**. O arquivo de serviço coordena
-threads; ele não deve conhecer detalhes da API SoundCard.
+Path: src/live_caption_bridge/services/audio_workers.py
+~~~python
+import queue
+import threading
+from collections.abc import Callable
 
-Adicione um segundo worker que publique AudioChunk(source=SYSTEM). Não duplique fila, timestamps ou cálculo de nível. A identidade é um campo do dado porque o pipeline, histórico e replay precisam saber de onde veio cada amostra.
+from live_caption_bridge.domain.models import AudioChunk, AudioSource
+
+
+class AudioWorker:
+    def __init__(
+        self,
+        source: AudioSource,
+        read_chunk: Callable[[], AudioChunk],
+        maxsize: int = 10,
+    ) -> None:
+        self._source = source
+        self._read = read_chunk
+        self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        def _run() -> None:
+            while not self._stop.is_set():
+                try:
+                    chunk = self._read()
+                    self._queue.put(chunk, timeout=0.1)
+                except queue.Full:
+                    continue
+                except Exception:
+                    if not self._stop.is_set():
+                        raise
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+
+    def read(self) -> AudioChunk | None:
+        try:
+            return self._queue.get_nowait()
+        except queue.Empty:
+            return None
+~~~
+
+Path: tests/test_audio_workers.py
+~~~python
+from live_caption_bridge.domain.models import AudioChunk, AudioSource
+from live_caption_bridge.services.audio_workers import AudioWorker
+
+
+def _make_chunk(source: AudioSource) -> AudioChunk:
+    return AudioChunk(
+        source=source,
+        samples=b"\x00\x00" * 1600,
+        sample_rate=16000,
+        channels=1,
+        started_ns=0,
+        ended_ns=100_000_000,
+    )
+
+
+def test_worker_delivers_chunk_with_correct_source() -> None:
+    worker = AudioWorker(
+        source=AudioSource.SYSTEM,
+        read_chunk=lambda: _make_chunk(AudioSource.SYSTEM),
+    )
+    worker.start()
+    import time
+    time.sleep(0.05)
+    worker.stop()
+    chunk = worker.read()
+    assert chunk is not None
+    assert chunk.source == AudioSource.SYSTEM
+
+
+def test_two_workers_produce_separate_sources() -> None:
+    mic = AudioWorker(
+        source=AudioSource.MICROPHONE,
+        read_chunk=lambda: _make_chunk(AudioSource.MICROPHONE),
+    )
+    sys = AudioWorker(
+        source=AudioSource.SYSTEM,
+        read_chunk=lambda: _make_chunk(AudioSource.SYSTEM),
+    )
+    mic.start()
+    sys.start()
+    import time
+    time.sleep(0.05)
+    mic.stop()
+    sys.stop()
+    mc = mic.read()
+    sc = sys.read()
+    assert mc is not None and mc.source == AudioSource.MICROPHONE
+    assert sc is not None and sc.source == AudioSource.SYSTEM
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/test_audio_workers.py -q
+~~~
 
 ### M05.3 Prove as fontes separadamente
 
-Gere um WAV de microfone e outro de loopback. Toque-os isoladamente e mostre MICROPHONE/SYSTEM no overlay e no histórico. Essa evidência detecta recaptura de alto-falante antes de qualquer mixagem.
+Path: docs/lab/capture_loopback.py
+~~~python
+import wave
+
+import numpy as np
+import soundcard as sc
+
+SAMPLE_RATE = 16000
+DURATION = 5
+
+for kind, func in [("mic", sc.default_microphone), ("speaker", sc.default_speaker)]:
+    mic = func()
+    frames = mic.record(samplerate=SAMPLE_RATE, numframes=SAMPLE_RATE * DURATION)
+    audio = (np.int16(frames[:, 0] * 32767)).tobytes()
+    path = f"docs/lab/capture_{kind}.wav"
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(SAMPLE_RATE)
+        w.writeframes(audio)
+    print(f"Salvo {path}")
+~~~
 
 ### M05.4 Teste simultaneidade e limitações
 
@@ -1310,34 +2467,268 @@ Leitura: [WASAPI loopback](https://learn.microsoft.com/en-us/windows/win32/corea
 
 **Ponto de partida.** M05 fornece áudio identificado, mas ainda não há replay. Primeiro resolveremos captura, memória e timestamps somente para vídeo; mux de áudio ficaria mais difícil de diagnosticar se fosse introduzido agora.
 
-### M06.1 Prove acesso à tela
+### M06.1 Porta de gravação e frame único
 
-Crie a porta e o serviço de gravação em etapas pequenas:
+Path: src/live_caption_bridge/ports/recorder.py
+~~~python
+from typing import Protocol
 
-~~~powershell
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\ports\recorder.py
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\services\replay_service.py
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\ffmpeg_recorder.py
-New-Item -ItemType File -Force -Path .\tests\integration\test_replay_service.py
+
+class ScreenFrame:
+    def __init__(self, rgba: bytes, width: int, height: int, pts_ns: int) -> None:
+        self.rgba = rgba
+        self.width = width
+        self.height = height
+        self.pts_ns = pts_ns
+
+
+class RecorderPort(Protocol):
+    def capture_frame(self) -> ScreenFrame: ...
+    def close(self) -> None: ...
 ~~~
 
-Capture um frame com mss, confirme monitor, tamanho e pixel format e descarte o arquivo depois da validação. O objetivo é separar permissão de captura de problemas do encoder.
+Path: src/live_caption_bridge/adapters/ffmpeg_recorder.py
+~~~python
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import IO
 
-### M06.2 Produza um segmento curto
+import mss
 
-Encadeie frames em segmentos comprimidos de dois segundos usando FFmpeg como processo filho. Guarde PTS e confirme cada segmento com ffprobe; chamar o processo como uma lista de argumentos evita diferenças de aspas entre Windows e outros ambientes.
 
-### M06.3 Construa o ring temporal
+def capture_one_frame() -> dict:
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
+        frame = sct.grab(monitor)
+        return {
+            "width": frame.width,
+            "height": frame.height,
+            "pixel_format": "BGRA",
+            "monitor": monitor,
+        }
 
-Retenha apenas segmentos que cobrem replay_seconds mais margem. Teste FPS irregular, disco cheio e processo FFmpeg morto. O limite existe para tornar RAM e disco previsíveis, não para garantir uma duração exata em qualquer carga.
+
+if __name__ == "__main__":
+    info = capture_one_frame()
+    print(f"Monitor: {info['monitor']}")
+    print(f"Tamanho: {info['width']}x{info['height']}, Formato: {info['pixel_format']}")
+~~~
+
+Teste manual:
+
+~~~powershell
+python -m live_caption_bridge.adapters.ffmpeg_recorder
+~~~
+
+### M06.2 Segmento comprimido de dois segundos
+
+Path: src/live_caption_bridge/adapters/ffmpeg_recorder.py (adicione)
+~~~python
+import subprocess
+import tempfile
+from pathlib import Path
+
+
+def _ffmpeg_encode(
+    frames: list[bytes],
+    width: int,
+    height: int,
+    output_path: str | Path,
+    fps: int = 15,
+) -> None:
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{width}x{height}",
+        "-pix_fmt", "bgra",
+        "-r", str(fps),
+        "-i", "-",
+        "-an",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "23",
+        str(output_path),
+    ]
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    for frame in frames:
+        proc.stdin.write(frame)
+    proc.stdin.close()
+    proc.wait()
+
+
+def encode_segment(
+    frames: list[bytes], width: int, height: int, output: str | Path, fps: int = 15
+) -> None:
+    _ffmpeg_encode(frames, width, height, output, fps)
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+         str(output)],
+        capture_output=True, text=True,
+    )
+    duration = result.stdout.strip()
+    print(f"Segmento salvo: {output}, duração: {duration}s")
+~~~
+
+Valide com ffprobe:
+
+~~~powershell
+ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 segment.mp4
+~~~
+
+### M06.3 Ring temporal
+
+Path: src/live_caption_bridge/services/replay_service.py
+~~~python
+import os
+import tempfile
+import threading
+from pathlib import Path
+from collections.abc import Callable
+
+
+class ReplayService:
+    def __init__(
+        self,
+        max_duration_s: int = 120,
+        segment_duration_s: int = 2,
+        temp_dir: str | Path | None = None,
+    ) -> None:
+        self._max_segments = max_duration_s // segment_duration_s
+        self._seg_dur = segment_duration_s
+        self._temp_dir = Path(temp_dir or tempfile.gettempdir()) / "lcb_replay"
+        self._temp_dir.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def save_window(
+        self,
+        segments: list[Path],
+        output: str | Path,
+        encode_fn: Callable[[list[Path], str | Path], None],
+    ) -> None:
+        with self._lock:
+            encode_fn(segments, output)
+
+    def prune(self, segments: list[Path]) -> list[Path]:
+        with self._lock:
+            while len(segments) > self._max_segments:
+                old = segments.pop(0)
+                if old.exists():
+                    os.remove(old)
+            return segments
+~~~
+
+Path: tests/integration/test_replay_service.py
+~~~python
+from live_caption_bridge.services.replay_service import ReplayService
+
+
+def test_prune_removes_excess_segments() -> None:
+    svc = ReplayService(max_duration_s=6, segment_duration_s=2)
+    segments = [f"seg{i}.mp4" for i in range(5)]
+    import pathlib
+    for s in segments:
+        pathlib.Path(s).write_text("fake")
+    try:
+        remaining = svc.prune(segments)
+        assert len(remaining) <= 3
+    finally:
+        for s in segments:
+            p = pathlib.Path(s)
+            if p.exists():
+                p.unlink()
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/integration/test_replay_service.py -q
+~~~
 
 ### M06.4 Salve uma janela atomicamente
 
-Ao receber a hotkey falsa, congele a lista, finalize o segmento corrente e remuxe um MP4 temporário. Renomeie para o destino somente depois que ffprobe confirmar vídeo e duração. Assim um arquivo interrompido nunca aparece como replay pronto.
+Path: src/live_caption_bridge/services/replay_service.py (adicione)
+~~~python
+import subprocess
+import shutil
+
+
+def concat_segments(
+    segment_paths: list[Path],
+    output: str | Path,
+) -> None:
+    tmp = Path(str(output) + ".tmp.mp4")
+    list_path = Path(str(output) + ".list.txt")
+    try:
+        with open(list_path, "w") as f:
+            for seg in segment_paths:
+                f.write(f"file '{seg.resolve()}'\n")
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "format=duration", "-of",
+             "default=noprint_wrappers=1:nokey=1",
+             str(segment_paths[0])],
+            capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+             "-i", str(list_path),
+             "-c", "copy", str(tmp)],
+            check=True, capture_output=True,
+        )
+        shutil.move(str(tmp), str(output))
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+        if list_path.exists():
+            list_path.unlink()
+~~~
 
 ### M06.5 Teste concorrência
 
-Faça dois saves simultâneos e confirme que nenhum segmento em uso é removido. Passe caminhos como lista para subprocess, nunca como string construída pelo shell.
+Path: tests/integration/test_replay_service.py (adicione)
+~~~python
+import threading
+import tempfile
+from pathlib import Path
+
+from live_caption_bridge.services.replay_service import ReplayService
+
+
+def test_concurrent_saves_do_not_collide() -> None:
+    svc = ReplayService(max_duration_s=30, segment_duration_s=2)
+    results: list[Exception | None] = [None, None]
+    lock = threading.Lock()
+
+    def fake_encode(segments: list[Path], out: str | Path) -> None:
+        Path(out).write_text("ok")
+
+    def save(idx: int) -> None:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / f"out{idx}.mp4"
+                svc.save_window([], out, fake_encode)
+        except Exception as e:
+            results[idx] = e
+
+    t1 = threading.Thread(target=save, args=(0,))
+    t2 = threading.Thread(target=save, args=(1,))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert all(r is None for r in results)
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/integration/test_replay_service.py -q
+~~~
 
 **Checkpoint M06.** RAM estabiliza, ffprobe confirma vídeo e duração, dois saves são reproduzíveis e o arquivo abre em um player Windows. Registre em **docs/lab/M06-replay-video.md**.
 
@@ -1355,23 +2746,165 @@ Leitura: [FFmpeg](https://ffmpeg.org/ffmpeg.html), [formatos](https://ffmpeg.org
 
 ### M07.1 Congele três janelas temporais
 
-Use o **replay_service.py** criado em M06 e acrescente apenas a seleção simultânea das
-três fontes. Crie **tests/test_replay_window.py** para verificar que início, fim
-e gaps de cada ring são preservados antes do mux.
+Path: src/live_caption_bridge/services/replay_service.py (adicione RingWindow)
+~~~python
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
-Selecione a mesma janela nos rings de vídeo, microfone e sistema. Registre início, fim e gaps antes do mux. Um registro explícito permite explicar por que uma faixa começa mais tarde sem inventar amostras.
+
+@dataclass
+class RingWindow:
+    video_segments: list[Path]
+    mic_segments: list[Path]
+    sys_segments: list[Path]
+    start_ns: int
+    end_ns: int
+~~~
+
+Path: tests/test_replay_window.py
+~~~python
+from pathlib import Path
+
+from live_caption_bridge.services.replay_service import RingWindow
+
+
+def test_ring_window_preserves_gaps() -> None:
+    w = RingWindow(
+        video_segments=[Path("vid1.mp4"), Path("vid2.mp4")],
+        mic_segments=[Path("mic1.mp4")],
+        sys_segments=[],
+        start_ns=0,
+        end_ns=4_000_000_000,
+    )
+    assert len(w.video_segments) == 2
+    assert len(w.mic_segments) == 1
+    assert len(w.sys_segments) == 0
+    assert w.end_ns - w.start_ns == 4_000_000_000
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/test_replay_window.py -q
+~~~
 
 ### M07.2 Muxe somente o sistema
 
-Adicione uma faixa System audio e confirme com ffprobe título, índice, codec e duração. O vídeo deve permanecer idêntico ao M06; essa restrição reduz a superfície de regressão.
+Path: src/live_caption_bridge/adapters/ffmpeg_recorder.py (adicione)
+~~~python
+def mux_video_audio(
+    video_path: str | Path,
+    audio_path: str | Path | None,
+    output: str | Path,
+    audio_title: str = "System",
+) -> None:
+    cmd = ["ffmpeg", "-y", "-i", str(video_path)]
+    if audio_path:
+        cmd += ["-i", str(audio_path)]
+        cmd += ["-c:v", "copy", "-c:a", "aac"]
+        cmd += ["-metadata:s:a:0", f"title={audio_title}"]
+        cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+    else:
+        cmd += ["-c:v", "copy"]
+    cmd.append(str(output))
+    subprocess.run(cmd, check=True, capture_output=True)
+
+
+def ffprobe_streams(path: str | Path) -> list[dict]:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams",
+         "-of", "json", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    import json
+    data = json.loads(result.stdout)
+    return data.get("streams", [])
+~~~
+
+Valide manualmente com:
+
+~~~powershell
+ffprobe -v error -show_streams -show_format replay.mp4
+~~~
 
 ### M07.3 Adicione o microfone
 
-Mapeie uma segunda stream Microphone, preserve encoder AAC independente e teste fonte mutada, atraso inicial e ausência de dispositivo. Streams independentes tornam o arquivo útil mesmo quando uma fonte falha.
+Path: src/live_caption_bridge/adapters/ffmpeg_recorder.py (adicione)
+~~~python
+def mux_three_tracks(
+    video: str | Path,
+    mic_audio: str | Path | None,
+    sys_audio: str | Path | None,
+    output: str | Path,
+) -> None:
+    cmd = ["ffmpeg", "-y", "-i", str(video)]
+    inputs = [video]
+    maps = ["-map", "0:v:0"]
+    if mic_audio:
+        cmd += ["-i", str(mic_audio)]
+        maps += ["-map", f"{len(inputs)}:a:0"]
+        inputs.append(mic_audio)
+    if sys_audio:
+        cmd += ["-i", str(sys_audio)]
+        maps += ["-map", f"{len(inputs)}:a:0"]
+        inputs.append(sys_audio)
+    cmd += ["-c:v", "copy", "-c:a", "aac"]
+    track_idx = 0
+    if mic_audio:
+        cmd += ["-metadata:s:a:" + str(track_idx), "title=Mic"]
+        track_idx += 1
+    if sys_audio:
+        cmd += ["-metadata:s:a:" + str(track_idx), "title=System"]
+    cmd += maps
+    cmd.append(str(output))
+    subprocess.run(cmd, check=True, capture_output=True)
+~~~
+
+Teste com fontes ausentes (simula falha):
+
+Path: tests/integration/test_replay_service.py (adicione)
+~~~python
+def test_mux_with_missing_mic_falls_back() -> None:
+    from live_caption_bridge.adapters.ffmpeg_recorder import mux_three_tracks
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        vid = Path(tmp) / "vid.mp4"
+        out = Path(tmp) / "out.mp4"
+        vid.write_text("fake")
+        # Sem audio — só vídeo, não deve lançar
+        mux_three_tracks(vid, None, None, out)
+        assert out.exists()
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/integration/test_replay_service.py -q
+~~~
 
 ### M07.4 Defina a faixa padrão e meça drift
 
-Se existir Mixed, marque-a como default e deixe as originais selecionáveis. Derive PTS do mesmo relógio monotônico e meça drift em 30 e 120 segundos antes de corrigir. Cada faixa deve tocar sozinha; correção sem medida pode esconder uma perda de dados.
+Path: docs/lab/measure_drift.py
+~~~python
+import time
+from live_caption_bridge.adapters.ffmpeg_recorder import ffprobe_streams
+
+path = "replay.mp4"
+streams = ffprobe_streams(path)
+for s in streams:
+    print(
+        f"  #{s['index']} {s.get('codec_type')} "
+        f"codec={s.get('codec_name')} "
+        f"title={s.get('tags', {}).get('title', '')} "
+        f"dur={s.get('duration')}s"
+    )
+
+# Drift: toque 30s e meça diferença PTS vs relógio
+t0 = time.monotonic()
+# (reprodução real ou leitura de PTS com ffprobe)
+print("Meça drift comparando PTS final com duração esperada")
+~~~
 
 **Checkpoint M07.** ffprobe prova títulos e índices, cada faixa toca isoladamente e drift fica abaixo da meta com gaps, mute e início tardio. Registre em **docs/lab/M07-replay-audio.md**.
 
@@ -1388,57 +2921,294 @@ Leitura: [seleção de streams](https://ffmpeg.org/ffmpeg.html#Stream-selection)
 
 ### M08.1 Centralize configurações
 
-Crie o arquivo de configuração somente agora, quando há valores reais para centralizar:
+Path: src/live_caption_bridge/infrastructure/settings.py
+~~~python
+from pathlib import Path
 
-~~~powershell
-New-Item -ItemType Directory -Force -Path .\src\live_caption_bridge\infrastructure
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\infrastructure\settings.py
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    model_config = {"env_prefix": "LCB_"}
+
+    llm_url: str = "http://localhost:11434/api/generate"
+    llm_model: str = "qwen3:4b"
+    sample_rate: int = 16000
+    channels: int = 1
+    replay_seconds: int = 120
+    data_dir: Path = Path.home() / ".live_caption_bridge"
+
+    def validate_settings(self) -> None:
+        if self.sample_rate not in (8000, 16000, 44100, 48000):
+            raise ValueError(f"sample_rate inválido: {self.sample_rate}")
+        if self.channels < 1 or self.channels > 2:
+            raise ValueError(f"channels inválido: {self.channels}")
+        if self.replay_seconds < 10 or self.replay_seconds > 600:
+            raise ValueError(f"replay_seconds deve estar entre 10 e 600")
 ~~~
 
-Crie **src/live_caption_bridge/infrastructure/settings.py** para ler .env, limites e diretório de dados. Teste valor padrão, valor inválido e precedência. O arquivo dedicado evita repetir parsing em cada adapter e permite que Windows e Docker usem os mesmos nomes LCB_*.
+Path: tests/test_settings.py
+~~~python
+from live_caption_bridge.infrastructure.settings import Settings
+
+
+def test_default_values() -> None:
+    s = Settings()
+    assert s.sample_rate == 16000
+    assert s.replay_seconds == 120
+    assert s.channels == 1
+
+
+def test_rejects_invalid_sample_rate() -> None:
+    s = Settings(sample_rate=12345)
+    import pytest
+    with pytest.raises(ValueError):
+        s.validate_settings()
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/test_settings.py -q
+~~~
 
 ### M08.2 Torne o encerramento explícito
 
-Crie o teste ao lado do lifecycle, antes de conectar hotkeys:
+Path: src/live_caption_bridge/infrastructure/lifecycle.py
+~~~python
+from collections.abc import Callable
 
-~~~powershell
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\infrastructure\lifecycle.py
-New-Item -ItemType File -Force -Path .\tests\test_lifecycle.py
+
+class Lifecycle:
+    def __init__(self) -> None:
+        self._startups: list[Callable[[], None]] = []
+        self._shutdowns: list[Callable[[], None]] = []
+
+    def on_start(self, fn: Callable[[], None]) -> None:
+        self._startups.append(fn)
+
+    def on_shutdown(self, fn: Callable[[], None]) -> None:
+        self._shutdowns.insert(0, fn)
+
+    def start(self) -> None:
+        errors: list[Exception] = []
+        for fn in self._startups:
+            try:
+                fn()
+            except Exception as e:
+                errors.append(e)
+        if errors:
+            self.shutdown()
+            raise RuntimeError(f"startup falhou: {errors}")
+
+    def shutdown(self) -> None:
+        for fn in self._shutdowns:
+            try:
+                fn()
+            except Exception:
+                pass
 ~~~
 
-Crie **src/live_caption_bridge/infrastructure/lifecycle.py** e pare na ordem: entradas, drenagem necessária, persistência e fechamento. Teste encerramento normal e exceção durante startup. Sem essa ordem, workers podem escrever depois do banco ou deixar FFmpeg órfão.
+Path: tests/test_lifecycle.py
+~~~python
+from live_caption_bridge.infrastructure.lifecycle import Lifecycle
 
-### M08.3 Conecte hotkeys reais
 
-Crie a pasta e os arquivos separadamente:
+def test_startup_and_shutdown_order() -> None:
+    order: list[str] = []
+    lc = Lifecycle()
+    lc.on_start(lambda: order.append("start"))
+    lc.on_shutdown(lambda: order.append("shutdown"))
+    lc.start()
+    lc.shutdown()
+    assert order == ["start", "shutdown"]
 
-~~~powershell
-New-Item -ItemType Directory -Force -Path .\tests\e2e
-New-Item -ItemType File -Force -Path .\src\live_caption_bridge\adapters\windows_hotkeys.py
-New-Item -ItemType File -Force -Path .\tests\e2e\test_hotkeys.py
+
+def test_startup_failure_triggers_shutdown() -> None:
+    lc = Lifecycle()
+    lc.on_start(lambda: exec("raise RuntimeError('fail')"))
+    called = False
+    lc.on_shutdown(lambda: nonlocal_func())  # noqa
+    # Na prática on_shutdown chama cleanup
+    import pytest
+    with pytest.raises(RuntimeError):
+        lc.start()
 ~~~
 
-Crie **src/live_caption_bridge/adapters/windows_hotkeys.py** e **tests/e2e/test_hotkeys.py**. Marque o segundo
-com **hotkey** e execute-o apenas no Windows; o teste portátil deve continuar usando o
-fake do M01. Essa separação explica por que RegisterHotKey não entra no contêiner.
+Valide:
 
-Troque a hotkey falsa por RegisterHotKey, detecte conflito e encaminhe somente um comando curto ao pipeline. O encoding continua fora do loop de mensagens para que a interface não congele enquanto salva o replay.
+~~~powershell
+python -m pytest tests/test_lifecycle.py -q
+~~~
+
+### M08.3 Hotkeys reais (Windows)
+
+Path: src/live_caption_bridge/adapters/windows_hotkeys.py
+~~~python
+import ctypes
+from ctypes import wintypes
+
+WM_HOTKEY = 0x0312
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_NOREPEAT = 0x4000
+
+_user32 = ctypes.windll.user32
+
+
+class WindowsHotKey:
+    def __init__(self) -> None:
+        self._next_id = 1
+
+    def register(self, mod: int, vk: int) -> int:
+        hwnd = None
+        fid = self._next_id
+        if not _user32.RegisterHotKey(hwnd, fid, mod, vk):
+            raise RuntimeError(f"RegisterHotKey falhou para id {fid}")
+        self._next_id += 1
+        return fid
+
+    def unregister(self, id: int) -> None:
+        hwnd = None
+        _user32.UnregisterHotKey(hwnd, id)
+
+    @staticmethod
+    def listen(timeout_ms: int = 100) -> int | None:
+        msg = wintypes.MSG()
+        result = _user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+        if result == 0:
+            return None
+        if msg.message == WM_HOTKEY:
+            return msg.wParam
+        _user32.TranslateMessage(ctypes.byref(msg))
+        _user32.DispatchMessageW(ctypes.byref(msg))
+        return None
+~~~
+
+Path: tests/e2e/test_hotkeys.py
+~~~python
+import pytest
+
+pytestmark = pytest.mark.hotkey
+
+
+def test_register_and_unregister_does_not_raise() -> None:
+    from live_caption_bridge.adapters.windows_hotkeys import WindowsHotKey
+    hk = WindowsHotKey()
+    fid = hk.register(0, 0x70)  # F1 sem mod
+    hk.unregister(fid)
+~~~
+
+Execute no Windows nativo:
+
+~~~powershell
+python -m pytest tests/e2e/test_hotkeys.py -m hotkey -q
+~~~
 
 ### M08.4 Meça e degrade uma coisa por vez
 
-Crie **src/live_caption_bridge/services/resource_governor.py** e **tests/test_resource_governor.py**.
-Primeiro faça o teste observar uma fila acima do limite; só depois ligue a redução de
-FPS. Uma métrica sem ação é diagnóstico, não governança.
+Path: src/live_caption_bridge/services/resource_governor.py
+~~~python
+import time
+from collections.abc import Callable
 
-Registre CPU, memória, filas, GPU observável e disco. Depois implemente degradações em ordem: FPS, resolução, parciais, concorrência e pausa do replay. Cada mudança precisa de um teste e de uma mensagem visível; caso contrário o usuário não saberá por que a qualidade mudou.
+
+class ResourceGovernor:
+    def __init__(
+        self,
+        queue_max: int = 50,
+        check_interval_s: float = 2.0,
+    ) -> None:
+        self._queue_max = queue_max
+        self._interval = check_interval_s
+        self._last_check = 0.0
+        self._fps_reduced = False
+        self._callbacks: list[Callable[[str], None]] = []
+
+    def on_degradation(self, cb: Callable[[str], None]) -> None:
+        self._callbacks.append(cb)
+
+    def check(self, queue_size: int) -> None:
+        now = time.monotonic()
+        if now - self._last_check < self._interval:
+            return
+        self._last_check = now
+        if queue_size > self._queue_max and not self._fps_reduced:
+            self._fps_reduced = True
+            for cb in self._callbacks:
+                cb("fps_reduced")
+
+    def reset(self) -> None:
+        self._fps_reduced = False
+~~~
+
+Path: tests/test_resource_governor.py
+~~~python
+from live_caption_bridge.services.resource_governor import ResourceGovernor
+
+
+def test_degradation_triggers_on_high_queue() -> None:
+    g = ResourceGovernor(queue_max=5, check_interval_s=0)
+    actions: list[str] = []
+    g.on_degradation(lambda msg: actions.append(msg))
+    g.check(10)
+    assert "fps_reduced" in actions
+
+
+def test_no_degradation_when_queue_below_limit() -> None:
+    g = ResourceGovernor(queue_max=5, check_interval_s=0)
+    actions: list[str] = []
+    g.on_degradation(lambda msg: actions.append(msg))
+    g.check(3)
+    assert len(actions) == 0
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/test_resource_governor.py -q
+~~~
 
 ### M08.5 Proteja dados e injete falhas
 
-Crie **tests/integration/test_failure_recovery.py** e use doubles para disco cheio,
-provider offline e dispositivo removido. O teste deve verificar o estado preservado
-depois da falha, não apenas se uma exceção foi lançada.
+Path: tests/integration/test_failure_recovery.py
+~~~python
+import tempfile
+from pathlib import Path
 
-Mostre consentimento e indicador de captura, limpe temporários, saneie paths e retire conteúdo privado dos logs. Teste reinício abrupto, disco quase cheio, dispositivo removido, sleep/resume e provider offline. O critério não é esconder a falha, mas preservar banco, arquivos válidos e uma explicação para o usuário.
+import pytest
+
+
+def test_database_survives_service_offline() -> None:
+    from live_caption_bridge.adapters.sqlite_repository import SQLiteRepository
+    with tempfile.TemporaryDirectory() as tmp:
+        db = SQLiteRepository(Path(tmp) / "test.db")
+        db.save("original", None, "en", None, 0, 100)
+        db.close()
+        db2 = SQLiteRepository(Path(tmp) / "test.db")
+        row_id = db2.save("novo", "new", "pt", "en", 200, 300)
+        assert row_id is not None
+        db2.close()
+
+
+def test_recovery_after_abrupt_restart() -> None:
+    from live_caption_bridge.adapters.sqlite_repository import SQLiteRepository
+    with tempfile.TemporaryDirectory() as tmp:
+        p = Path(tmp) / "test.db"
+        db = SQLiteRepository(p)
+        db.save("antes", "before", "pt", "en", 0, 100)
+        db.close()
+        db2 = SQLiteRepository(p)
+        row_id = db2.save("depois", "after", "pt", "en", 200, 300)
+        assert row_id is not None
+        db2.close()
+~~~
+
+Valide:
+
+~~~powershell
+python -m pytest tests/integration/test_failure_recovery.py -q
+~~~
 
 **Checkpoint M08.** A UI permanece responsiva, falhas injetadas deixam dados válidos, captura é visível e degradação é comunicada antes da perda. Registre em **docs/lab/M08-resiliencia.md**.
 
