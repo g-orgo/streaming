@@ -18,7 +18,7 @@ class FakeSTT:
 def test_pipeline_delivers_caption_to_sink() -> None:
     sink = FakeCaptionSink()
     stt = FakeSTT()
-    p = Pipeline(stt=stt, sink=sink)
+    p = Pipeline(stt=stt, sink=sink) # type: ignore
     chunk = AudioChunk(
         source=AudioSource.MICROPHONE,
         samples=b"\x00\x00" * 16000,
