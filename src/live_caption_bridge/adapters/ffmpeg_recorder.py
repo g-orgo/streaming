@@ -1,17 +1,17 @@
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import mss
 
 
 def capture_one_frame() -> dict[str, Any]:
-    with mss.MSS() as sct: # type: ignore
-        monitor = sct.monitors[1] # type: ignore
-        frame = sct.grab(monitor) # type: ignore
+    with mss.MSS() as sct:
+        monitor = sct.monitors[1]
+        frame = sct.grab(monitor)
         return {
-            "width": frame.width, # type: ignore
-            "height": frame.height, # type: ignore
+            "width": frame.width,
+            "height": frame.height,
             "pixel_format": "BGRA",
             "monitor": monitor,
         }
@@ -85,8 +85,8 @@ def ffprobe_streams(path: str | Path) -> list[dict[str, Any]]:
         capture_output=True, text=True, check=True,
     )
     import json
-    data = json.loads(result.stdout)
-    return data.get("streams", [])
+    data: Any = json.loads(result.stdout)
+    return cast("list[dict[str, Any]]", data.get("streams", []))
 
 def mux_three_tracks(
     video: str | Path,

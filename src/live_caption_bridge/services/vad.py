@@ -66,9 +66,9 @@ def segment_chunks(
                     seg_start = None
 
     if in_speech and seg_start is not None:
-        end = last_speech_end if last_speech_end else seg_start # type: ignore
+        end = last_speech_end if last_speech_end else seg_start
         if end - seg_start > max_duration_ns:
             end = seg_start + max_duration_ns
-        segments.append((max(0, seg_start - pre_roll_ns), end)) # type: ignore
+        segments.append((max(0, seg_start - pre_roll_ns), end))
 
     return segments
