@@ -5,14 +5,21 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox,  QPushButton, QSpinBox,
     QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
-
 from live_caption_bridge.infrastructure.settings import Settings
 from live_caption_bridge.ui.overlay import Overlay
 
+from live_caption_bridge.adapters.pyaudio_audio import default_device_ids, list_devices, list_output_devices
+
+
+_WIN_LANG_MAP: dict[str, str] = {
+    "1046": "pt", "1033": "en", "1034": "es", "1036": "fr",
+    "1031": "de", "1040": "it", "1041": "ja", "2052": "zh",
+    "1042": "ko", "1043": "nl",
+}
 
 class ConfigTab(QWidget):
     def __init__(self, settings: Settings) -> None:
@@ -27,21 +34,6 @@ class ConfigTab(QWidget):
         audio_layout.addRow("Microfone:", self._mic_combo)
         audio_layout.addRow("Alto-falante:", self._speaker_combo)
         layout.addWidget(audio_group)
-
-        llm_group = QGroupBox("Tradução (LLM)")
-        llm_layout = QFormLayout(llm_group)
-        self._llm_url = QLineEdit(settings.llm_url)
-        self._llm_model = QLineEdit(settings.llm_model)
-        self._source_lang = QComboBox()
-        self._source_lang.addItems(["en", "pt", "es", "fr", "de"])
-        self._target_lang = QComboBox()
-        self._target_lang.addItems(["pt", "en", "es", "fr", "de"])
-        self._target_lang.setCurrentText("pt")
-        llm_layout.addRow("URL:", self._llm_url)
-        llm_layout.addRow("Modelo:", self._llm_model)
-        llm_layout.addRow("Idioma origem:", self._source_lang)
-        llm_layout.addRow("Idioma destino:", self._target_lang)
-        layout.addWidget(llm_group)
 
         replay_group = QGroupBox("Replay")
         replay_layout = QFormLayout(replay_group)
@@ -138,6 +130,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(tabs)
 
         self._init_menu()
+        self._refresh_devices()
 
         self._running = False
         self._timer = QTimer()
@@ -154,6 +147,27 @@ class MainWindow(QMainWindow):
         about_action = QAction("Sobre", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+    def _refresh_devices(self) -> None:
+        mics = list_devices()
+        speakers = list_output_devices()
+        defaults = default_device_ids()
+
+        mic_names = [d["name"] for d in mics] or ["Nenhum microfone encontrado"]
+        speaker_names = [d["name"] for d in speakers] or ["Nenhum speaker encontrado"]
+
+        self._config_tab.refresh_devices(mic_names, speaker_names)
+
+        if defaults["input"] is not None:
+            for i, d in enumerate(mics):
+                if int(d["id"]) == defaults["input"]:
+                    self._config_tab._mic_combo.setCurrentIndex(i) # type: ignore
+                    break
+        if defaults["output"] is not None:
+            for i, d in enumerate(speakers):
+                if int(d["id"]) == defaults["output"]:
+                    self._config_tab._speaker_combo.setCurrentIndex(i) # type: ignore
+                    break
 
     def _show_about(self) -> None:
         QMessageBox.about(self, "LiveCaptionBridge",

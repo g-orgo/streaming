@@ -15,10 +15,26 @@ class Overlay(QWidget):
             )
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setStyleSheet("""
+            Overlay { background-color: rgba(0, 0, 0, 160); border-radius: 8px; }
+            QLabel { color: white; font-size: 26px; font-weight: bold; padding: 6px 16px; }
+        """)
         self._label = QLabel("Teste de legenda")
         self._label.setWordWrap(True)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._label)
+        self._position_at_bottom()
+
+    def _position_at_bottom(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            width = int(geo.width() * 0.6)
+            x = (geo.width() - width) // 2
+            y = geo.height() - 80
+            self.setGeometry(x, y, width, 60)
 
     def text(self) -> str:
         return self._label.text()

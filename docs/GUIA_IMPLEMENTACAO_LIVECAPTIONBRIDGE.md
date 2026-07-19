@@ -964,7 +964,7 @@ Crie o overlay como um QWidget frameless e translúcido que exibe legendas:
 Path: src/live_caption_bridge/ui/overlay.py
 ~~~python
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QWidget, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
 
 
 class Overlay(QWidget):
@@ -976,10 +976,26 @@ class Overlay(QWidget):
             | Qt.Tool
         )
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setStyleSheet("""
+            Overlay { background-color: rgba(0, 0, 0, 160); border-radius: 8px; }
+            QLabel { color: white; font-size: 26px; font-weight: bold; padding: 6px 16px; }
+        """)
         self._label = QLabel("Teste de legenda")
         self._label.setWordWrap(True)
+        self._label.setAlignment(Qt.AlignCenter)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._label)
+        self._position_at_bottom()
+
+    def _position_at_bottom(self) -> None:
+        screen = QApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            width = int(geo.width() * 0.6)
+            x = (geo.width() - width) // 2
+            y = geo.height() - 80
+            self.setGeometry(x, y, width, 70)
 
     def text(self) -> str:
         return self._label.text()
@@ -1161,15 +1177,43 @@ def list_devices() -> list[dict[str, str]]:
     devices: list[dict[str, str]] = []
     for i in range(p.get_device_count()):
         info = p.get_device_info_by_index(i)
-        if info["maxInputChannels"] > 0:
-            devices.append({"name": info["name"], "id": str(i)})
+        if int(info["maxInputChannels"]) > 0:
+            devices.append({"name": str(info["name"]), "id": str(i)})
     p.terminate()
     return devices
 
 
+def list_output_devices() -> list[dict[str, str]]:
+    p = pyaudio.PyAudio()
+    devices: list[dict[str, str]] = []
+    for i in range(p.get_device_count()):
+        info = p.get_device_info_by_index(i)
+        if int(info["maxOutputChannels"]) > 0 and int(info["maxInputChannels"]) == 0:
+            devices.append({"name": str(info["name"]), "id": str(i)})
+    p.terminate()
+    return devices
+
+
+def default_device_ids() -> dict[str, int | None]:
+    p = pyaudio.PyAudio()
+    try:
+        in_id = int(p.get_default_input_device_info()["index"])
+    except OSError:
+        in_id = None
+    try:
+        out_id = int(p.get_default_output_device_info()["index"])
+    except OSError:
+        out_id = None
+    p.terminate()
+    return {"input": in_id, "output": out_id}
+
+
 if __name__ == "__main__":
     for dev in list_devices():
-        print(dev["name"], dev["id"])
+        print(f"I {dev['name']} ({dev['id']})")
+    for dev in list_output_devices():
+        print(f"O {dev['name']} ({dev['id']})")
+    print(f"Default: {default_device_ids()}")
 ~~~
 
 Teste o contrato com um enumerador falso. Ele prova que a porta devolve nome e id sem
@@ -3494,20 +3538,40 @@ topo) e a janela principal oferece três abas.
 
 Path: src/live_caption_bridge/ui/main_window.py
 ~~~python
+import ctypes
+import locale
 import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem,
+    QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QMainWindow, QMessageBox, QPushButton, QSpinBox,
     QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
+from live_caption_bridge.adapters.pyaudio_audio import default_device_ids, list_devices, list_output_devices
 from live_caption_bridge.infrastructure.settings import Settings
 from live_caption_bridge.ui.overlay import Overlay
+
+
+_WIN_LANG_MAP: dict[str, str] = {
+    "1046": "pt", "1033": "en", "1034": "es", "1036": "fr",
+    "1031": "de", "1040": "it", "1041": "ja", "2052": "zh",
+}
+
+
+def _detect_target_language() -> str:
+    try:
+        lang_id = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+        return _WIN_LANG_MAP.get(str(lang_id), "en")
+    except Exception:
+        loc = locale.getdefaultlocale()
+        if loc and loc[0]:
+            return loc[0][:2]
+        return "en"
 
 
 class ConfigTab(QWidget):
@@ -3522,21 +3586,6 @@ class ConfigTab(QWidget):
         audio_layout.addRow("Microfone:", self._mic_combo)
         audio_layout.addRow("Alto-falante:", self._speaker_combo)
         layout.addWidget(audio_group)
-
-        llm_group = QGroupBox("Tradução (LLM)")
-        llm_layout = QFormLayout(llm_group)
-        self._llm_url = QLineEdit(settings.llm_url)
-        self._llm_model = QLineEdit(settings.llm_model)
-        self._source_lang = QComboBox()
-        self._source_lang.addItems(["en", "pt", "es", "fr", "de"])
-        self._target_lang = QComboBox()
-        self._target_lang.addItems(["pt", "en", "es", "fr", "de"])
-        self._target_lang.setCurrentText("pt")
-        llm_layout.addRow("URL:", self._llm_url)
-        llm_layout.addRow("Modelo:", self._llm_model)
-        llm_layout.addRow("Idioma origem:", self._source_lang)
-        llm_layout.addRow("Idioma destino:", self._target_lang)
-        layout.addWidget(llm_group)
 
         replay_group = QGroupBox("Replay")
         replay_layout = QFormLayout(replay_group)
@@ -3609,7 +3658,29 @@ class MainWindow(QMainWindow):
         tabs.addTab(InstructionsTab(), "Instruções")
         self.setCentralWidget(tabs)
 
-    def closeEvent(self, event) -> None:
+        self._refresh_devices()
+
+    def _refresh_devices(self) -> None:
+        mics = list_devices()
+        speakers = list_output_devices()
+        defaults = default_device_ids()
+        mic_names = [d["name"] for d in mics] or ["Nenhum microfone encontrado"]
+        speaker_names = [d["name"] for d in speakers] or ["Nenhum speaker encontrado"]
+        self._config_tab.refresh_devices(mic_names, speaker_names)
+        if defaults["input"] is not None:
+            for i, d in enumerate(mics):
+                if int(d["id"]) == defaults["input"]:
+                    self._config_tab._mic_combo.setCurrentIndex(i)
+                    break
+        if defaults["output"] is not None:
+            for i, d in enumerate(speakers):
+                if int(d["id"]) == defaults["output"]:
+                    self._config_tab._speaker_combo.setCurrentIndex(i)
+                    break
+        target = _detect_target_language()
+        logger.info("Idioma detectado: origem=en, destino=%s", target)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
         self._overlay.close()
         event.accept()
 
