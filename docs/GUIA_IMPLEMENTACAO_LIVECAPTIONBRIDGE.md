@@ -2751,6 +2751,12 @@ def encode_segment(
     print(f"Segmento salvo: {output}, duração: {duration}s")
 ~~~
 
+Gere um segmento de teste:
+
+~~~powershell
+python -c "import mss; from live_caption_bridge.adapters.ffmpeg_recorder import encode_segment; s=mss.MSS(); mon=s.monitors[1]; frames=[bytes(s.grab(mon).raw) for _ in range(30)]; s.close(); encode_segment(frames, mon['width'], mon['height'], 'segment.mp4', fps=15)"
+~~~
+
 Valide com ffprobe:
 
 ~~~powershell
@@ -3029,6 +3035,12 @@ def ffprobe_streams(path: str | Path) -> list[dict]:
     return data.get("streams", [])
 ~~~
 
+Gere um replay de teste usando o segmento do M06.2 e o primeiro WAV de microfone:
+
+~~~powershell
+python -c "from live_caption_bridge.adapters.ffmpeg_recorder import mux_video_audio; mux_video_audio('segment.mp4', 'docs/lab/capture_mic_0.wav', 'replay.mp4')"
+~~~
+
 Valide manualmente com:
 
 ~~~powershell
@@ -3063,7 +3075,9 @@ def mux_three_tracks(
         cmd += ["-i", str(sys_audio)]
         maps += ["-map", f"{len(inputs)}:a:0"]
         inputs.append(sys_audio)
-    cmd += ["-c:v", "copy", "-c:a", "aac"]
+    cmd += ["-c:v", "copy"]
+    if mic_audio or sys_audio:
+        cmd += ["-c:a", "aac"]
     track_idx = 0
     if mic_audio:
         cmd += ["-metadata:s:a:" + str(track_idx), "title=Mic"]
@@ -3081,11 +3095,12 @@ Path: tests/integration/test_replay_service.py (adicione)
 ~~~python
 def test_mux_with_missing_mic_falls_back() -> None:
     from live_caption_bridge.adapters.ffmpeg_recorder import mux_three_tracks
+    import shutil
     import tempfile
     with tempfile.TemporaryDirectory() as tmp:
         vid = Path(tmp) / "vid.mp4"
         out = Path(tmp) / "out.mp4"
-        vid.write_text("fake")
+        shutil.copy("segment.mp4", vid)
         # Sem audio — só vídeo, não deve lançar
         mux_three_tracks(vid, None, None, out)
         assert out.exists()
@@ -3498,7 +3513,29 @@ Construa a imagem Docker documentada e rode nela pytest, Ruff, mypy e ffprobe. R
 
 ### M09.3 Empacote no Windows nativo
 
-Gere o executável com PyInstaller, inclua plugins Qt e DLLs realmente necessários e teste em uma VM Windows limpa. O Docker continua sendo ferramenta de desenvolvimento e CI; não é interface de distribuição e não substitui o instalador Windows.
+O PyInstaller analisa as dependências e gera um diretório com o .exe e DLLs necessárias. O Vosk carrega o modelo do disco em runtime (não é embutido no .exe).
+
+Path: raiz do projeto
+
+~~~powershell
+pip install pyinstaller
+pyinstaller --onedir --windowed --name "LiveCaptionBridge" ^
+  --hidden-import vosk --hidden-import pyaudio --hidden-import mss ^
+  --hidden-import httpx --hidden-import pydantic_settings ^
+  --hidden-import keyring --hidden-import numpy ^
+  --add-data "src/live_caption_bridge;live_caption_bridge" ^
+  src/live_caption_bridge/__main__.py
+~~~
+
+O .exe estará em `dist\LiveCaptionBridge\LiveCaptionBridge.exe`. A primeira execução requer o modelo Vosk em `%USERPROFILE%\Vosk\vosk-model-small-en-us-0.15\`. Teste em uma VM Windows limpa para verificar se todas as DLLs foram incluídas.
+
+Para rebuildar após alterações:
+
+~~~powershell
+pyinstaller LiveCaptionBridge.spec
+~~~
+
+O Docker continua sendo ferramenta de desenvolvimento e CI; não é interface de distribuição e não substitui o instalador Windows.
 
 ### M09.4 Faça o E2E final
 

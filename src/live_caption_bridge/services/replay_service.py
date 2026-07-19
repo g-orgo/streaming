@@ -1,11 +1,20 @@
 import os
 import tempfile
 import threading
-from pathlib import Path
-from collections.abc import Callable
 import subprocess
 import shutil
+from pathlib import Path
+from collections.abc import Callable # Sequence
+from dataclasses import dataclass
 
+
+@dataclass
+class RingWindow:
+    video_segments: list[Path]
+    mic_segments: list[Path]
+    sys_segments: list[Path]
+    start_ns: int
+    end_ns: int
 
 class ReplayService:
     def __init__(
@@ -67,4 +76,3 @@ class ReplayService:
                 tmp.unlink()
             if list_path.exists():
                 list_path.unlink()
-

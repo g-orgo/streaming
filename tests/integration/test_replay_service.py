@@ -43,3 +43,16 @@ def test_concurrent_saves_do_not_collide() -> None:
     t1.join(timeout=5)
     t2.join(timeout=5)
     assert all(r is None for r in results)
+    
+def test_mux_with_missing_mic_falls_back() -> None:
+    from live_caption_bridge.adapters.ffmpeg_recorder import mux_three_tracks
+    import shutil
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        vid = Path(tmp) / "vid.mp4"
+        out = Path(tmp) / "out.mp4"
+        shutil.copy("segment.mp4", vid)
+        # Sem audio — só vídeo, não deve lançar
+        mux_three_tracks(vid, None, None, out)
+        assert out.exists()
+

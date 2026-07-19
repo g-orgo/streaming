@@ -60,6 +60,63 @@ def encode_segment(
     duration = result.stdout.strip()
     print(f"Segmento salvo: {output}, duração: {duration}s")
 
+def mux_video_audio(
+    video_path: str | Path,
+    audio_path: str | Path | None,
+    output: str | Path,
+    audio_title: str = "System",
+) -> None:
+    cmd = ["ffmpeg", "-y", "-i", str(video_path)]
+    if audio_path:
+        cmd += ["-i", str(audio_path)]
+        cmd += ["-c:v", "copy", "-c:a", "aac"]
+        cmd += ["-metadata:s:a:0", f"title={audio_title}"]
+        cmd += ["-map", "0:v:0", "-map", "1:a:0"]
+    else:
+        cmd += ["-c:v", "copy"]
+    cmd.append(str(output))
+    subprocess.run(cmd, check=True, capture_output=True)
+
+
+def ffprobe_streams(path: str | Path) -> list[dict[str, Any]]:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_streams",
+         "-of", "json", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    import json
+    data = json.loads(result.stdout)
+    return data.get("streams", [])
+
+def mux_three_tracks(
+    video: str | Path,
+    mic_audio: str | Path | None,
+    sys_audio: str | Path | None,
+    output: str | Path,
+) -> None:
+    cmd = ["ffmpeg", "-y", "-i", str(video)]
+    inputs = [video]
+    maps = ["-map", "0:v:0"]
+    if mic_audio:
+        cmd += ["-i", str(mic_audio)]
+        maps += ["-map", f"{len(inputs)}:a:0"]
+        inputs.append(mic_audio)
+    if sys_audio:
+        cmd += ["-i", str(sys_audio)]
+        maps += ["-map", f"{len(inputs)}:a:0"]
+        inputs.append(sys_audio)
+    cmd += ["-c:v", "copy"]
+    if mic_audio or sys_audio:
+        cmd += ["-c:a", "aac"]
+    track_idx = 0
+    if mic_audio:
+        cmd += ["-metadata:s:a:" + str(track_idx), "title=Mic"]
+        track_idx += 1
+    if sys_audio:
+        cmd += ["-metadata:s:a:" + str(track_idx), "title=System"]
+    cmd += maps
+    cmd.append(str(output))
+    subprocess.run(cmd, check=True, capture_output=True)
 
 
 if __name__ == "__main__":

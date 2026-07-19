@@ -28,3 +28,6 @@ live-caption-bridge = "live_caption_bridge.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+markers = ["hotkey: skip unless keyboard available"]

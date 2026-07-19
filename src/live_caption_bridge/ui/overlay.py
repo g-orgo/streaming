@@ -28,7 +28,6 @@ class Overlay(QWidget):
             caption.translated or caption.original
         )
 
-
 def main() -> None:
     app = QApplication(sys.argv)
     overlay = Overlay()
