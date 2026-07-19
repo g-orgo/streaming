@@ -1,12 +1,17 @@
 from typing import Protocol
 from live_caption_bridge.domain.models import AudioChunk
+from enum import StrEnum
 
+class DeviceKind(StrEnum):
+    MICROPHONE = "microphone"
+    SPEAKER = "speaker"
 
 class AudioDeviceInfo:
-    def __init__(self, name: str, id: int) -> None:
+    def __init__(self, name: str, id: int, kind: DeviceKind = DeviceKind.MICROPHONE) -> None:
         self.name = name
         self.id = id
-        
+        self.kind = kind
+
 class AudioSourcePort(Protocol):
     def list_devices(self) -> list[AudioDeviceInfo]: ...
     
