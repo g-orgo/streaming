@@ -959,84 +959,85 @@ New-Item -ItemType Directory -Force -Path .\tests\integration
 New-Item -ItemType File -Force -Path .\tests\integration\test_overlay.py
 ~~~
 
-Crie o overlay como um QWidget frameless e translúcido que exibe legendas:
+Crie o overlay como um QWidget frameless e translúcido que exibe legendas.
+A implementação suporta posicionamento (topo/inferior) e cores customizadas:
 
 Path: src/live_caption_bridge/ui/overlay.py
 ~~~python
+import sys
+from enum import StrEnum
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QLabel, QWidget, QVBoxLayout
 
+from live_caption_bridge.domain.models import Caption
+
+
+class OverlayPosition(StrEnum):
+    TOP = "top"
+    BOTTOM = "bottom"
+
+
+class OverlayColors:
+    def __init__(self, background: str = "rgba(0, 0, 0, 160)", text: str = "white") -> None:
+        self.background = background
+        self.text = text
+
 
 class Overlay(QWidget):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        position: OverlayPosition = OverlayPosition.BOTTOM,
+        colors: OverlayColors | None = None,
+    ) -> None:
         super().__init__()
+        self._position = position
+        self._colors = colors or OverlayColors()
+
         self.setWindowFlags(
-            Qt.FramelessWindowHint
-            | Qt.WindowStaysOnTopHint
-            | Qt.Tool
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
         )
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setStyleSheet("""
-            Overlay { background-color: rgba(0, 0, 0, 160); border-radius: 8px; }
-            QLabel { color: white; font-size: 26px; font-weight: bold; padding: 6px 16px; }
-        """)
-        self._label = QLabel("Teste de legenda")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._apply_style()
+
+        self._label = QLabel("")
         self._label.setWordWrap(True)
-        self._label.setAlignment(Qt.AlignCenter)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._label)
-        self._position_at_bottom()
+        self._reposition()
 
-    def _position_at_bottom(self) -> None:
+    def _apply_style(self) -> None:
+        self.setStyleSheet(f"""
+            Overlay {{ background-color: {self._colors.background}; border-radius: 8px; }}
+            QLabel {{ color: {self._colors.text}; font-size: 26px; font-weight: bold; padding: 6px 16px; }}
+        """)
+
+    def _reposition(self) -> None:
         screen = QApplication.primaryScreen()
-        if screen:
-            geo = screen.availableGeometry()
-            width = int(geo.width() * 0.6)
-            x = (geo.width() - width) // 2
-            y = geo.height() - 80
-            self.setGeometry(x, y, width, 70)
+        if not screen:
+            return
+        geo = screen.availableGeometry()
+        width = int(geo.width() * 0.6)
+        x = (geo.width() - width) // 2
+        h = 70
+        if self._position == OverlayPosition.BOTTOM:
+            y = geo.height() - h - 10
+        else:
+            y = 10
+        self.setGeometry(x, y, width, h)
 
     def text(self) -> str:
         return self._label.text()
-~~~
 
-Primeiro prove que o widget abre e fecha. O fixture **qtbot** do pytest-qt encerra o
-widget e evita sleeps arbitrários:
-
-Path: tests/integration/test_overlay.py
-~~~python
-def test_overlay_starts_with_placeholder(qtbot) -> None:
-    from live_caption_bridge.ui.overlay import Overlay
-
-    overlay = Overlay()
-    qtbot.addWidget(overlay)
-    assert overlay.text() == "Teste de legenda"
-~~~
-
-~~~powershell
-python -m pytest tests/integration -q
-~~~
-
-Depois de o placeholder aparecer, substitua a string fixa por um método que recebe uma
-Caption do sink. Adicione o import no topo do arquivo:
-
-Path: src/live_caption_bridge/ui/overlay.py
-~~~python
-from live_caption_bridge.domain.models import Caption
-~~~
-
-Depois adicione o método à classe Overlay:
-
-Path: src/live_caption_bridge/ui/overlay.py
-~~~python
     def display_caption(self, caption: Caption) -> None:
-        self._label.setText(
-            caption.translated or caption.original
-        )
+        self._label.setText(caption.translated or caption.original)
 ~~~
 
-E altere o teste para publicar uma legenda:
+Teste que o overlay abre, exibe uma legenda e fecha:
 
 Path: tests/integration/test_overlay.py
 ~~~python
@@ -1071,15 +1072,12 @@ testes. Abra `src/live_caption_bridge/ui/overlay.py` e acrescente no final:
 
 Path: src/live_caption_bridge/ui/overlay.py
 ~~~python
-import sys
-
-from PySide6.QtWidgets import QApplication
-
-
 def main() -> None:
     app = QApplication(sys.argv)
-    overlay = Overlay()
-    overlay.show()
+    bottom = Overlay(OverlayPosition.BOTTOM, OverlayColors("rgba(0,0,0,160)", "white"))
+    top = Overlay(OverlayPosition.TOP, OverlayColors("rgba(0,0,100,160)", "white"))
+    bottom.show()
+    top.show()
     caption = Caption(
         original="Olá mundo",
         translated="Hello world",
@@ -1088,7 +1086,8 @@ def main() -> None:
         started_ns=0,
         ended_ns=100,
     )
-    overlay.display_caption(caption)
+    bottom.display_caption(caption)
+    top.display_caption(caption)
     sys.exit(app.exec())
 
 
@@ -1096,8 +1095,9 @@ if __name__ == "__main__":
     main()
 ~~~
 
-`main()` cria um `QApplication`, instancia o Overlay e chama `show()` — sem isso a
-janela nunca aparece. O `if __name__ == "__main__"` permite executar diretamente:
+`main()` cria um `QApplication`, instancia dois Overlays (inferior para microfone,
+superior para sistema) e chama `show()` — sem isso a janela nunca aparece.
+O `if __name__ == "__main__"` permite executar diretamente:
 
 ~~~powershell
 python -m live_caption_bridge.ui.overlay
@@ -1699,15 +1699,33 @@ class WhisperSTT:
     def transcribe(self, chunk: AudioChunk) -> SpeechSegment:
         self._load()
 
+        rate = chunk.sample_rate
         data = chunk.samples
+
         if chunk.channels > 1:
             import array
             raw = array.array("h", data)
             data = raw[:: chunk.channels].tobytes()
+            rate = chunk.sample_rate
+
+        if rate != self._sample_rate:
+            import array
+            raw = array.array("h", data)
+            n = len(raw) * self._sample_rate // rate
+            resampled = array.array("h", [0]) * n
+            for i in range(n):
+                src = i * rate / self._sample_rate
+                j = int(src)
+                frac = src - j
+                if j + 1 < len(raw):
+                    resampled[i] = int(raw[j] * (1 - frac) + raw[j + 1] * frac)
+                else:
+                    resampled[i] = raw[j]
+            data = resampled.tobytes()
 
         self._rec.AcceptWaveform(data)
-        result = json.loads(self._rec.FinalResult())
-        text = result.get("text", "").strip()
+        partial = json.loads(self._rec.PartialResult())
+        text = partial.get("partial", "").strip()
 
         return SpeechSegment(
             text=text,
@@ -3532,9 +3550,128 @@ python -m pytest tests/integration/test_failure_recovery.py -q
 ### M08.6 Janela principal e produto final
 
 Todos os componentes até aqui funcionam isoladamente. A janela principal reúne
-configuração, visualização de replays, instruções e o overlay de legenda em um
-único processo. O overlay é sempre visível (frameless, transparente, sempre no
-topo) e a janela principal oferece três abas.
+configuração, visualização de replays, instruções e dois overlays de legenda em um
+único processo. Um overlay para microfone (inferior, fundo preto) e outro para áudio
+do sistema (superior, fundo azul escuro). O pipeline de legenda (áudio → STT →
+tradução → overlay) roda continuamente enquanto o app estiver aberto.
+
+Path: src/live_caption_bridge/services/caption_engine.py
+~~~python
+import logging
+import threading
+import time
+from collections.abc import Callable
+from typing import Any
+
+from live_caption_bridge.adapters.llm_translation import LLMTranslation
+from live_caption_bridge.adapters.pyaudio_audio import list_devices, list_output_devices
+from live_caption_bridge.adapters.whisper_stt import WhisperSTT
+from live_caption_bridge.domain.models import AudioChunk, AudioSource, Caption
+from live_caption_bridge.infrastructure.settings import Settings
+
+logger = logging.getLogger(__name__)
+
+
+class CaptionEngine:
+    def __init__(
+        self,
+        settings: Settings,
+        on_mic_caption: Callable[..., None],
+        on_sys_caption: Callable[..., None],
+    ) -> None:
+        self._settings = settings
+        self._on_mic = on_mic_caption
+        self._on_sys = on_sys_caption
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._stt = WhisperSTT()
+        self._llm = LLMTranslation(url=settings.llm_url, model=settings.llm_model)
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+        logger.info("CaptionEngine iniciado")
+
+    def stop(self) -> None:
+        self._running = False
+        logger.info("CaptionEngine parado")
+
+    def _loop(self) -> None:
+        import pyaudio
+
+        mic_id = self._resolve_device_id(list_devices(), 0)
+        sys_id = self._resolve_device_id(list_output_devices(), 0)
+        p = pyaudio.PyAudio()
+
+        streams: list[dict[str, Any]] = []
+        for idx, source in [(mic_id, AudioSource.MICROPHONE), (sys_id, AudioSource.SYSTEM)]:
+            if idx is not None:
+                try:
+                    info = p.get_device_info_by_index(idx)
+                    rate = int(info["defaultSampleRate"])
+                    channels = int(info["maxInputChannels"])
+                    if channels < 1:
+                        channels = 1
+                    stream = p.open(
+                        format=pyaudio.paInt16, channels=channels, rate=rate,
+                        input=True, input_device_index=idx,
+                        frames_per_buffer=4096,
+                    )
+                    streams.append({"stream": stream, "source": source, "rate": rate, "channels": channels, "buffer": b""})
+                except Exception as e:
+                    logger.warning("Falha ao abrir device %s: %s", source, e)
+
+        while self._running:
+            for s in streams:
+                try:
+                    data = s["stream"].read(4096, exception_on_overflow=False)
+                    s["buffer"] += data
+                    if len(s["buffer"]) < s["rate"] * 2:  # acumula ~2s de áudio
+                        continue
+                    chunk = AudioChunk(
+                        source=s["source"], samples=s["buffer"],
+                        sample_rate=s["rate"], channels=s["channels"],
+                        started_ns=time.monotonic_ns(),
+                        ended_ns=time.monotonic_ns(),
+                    )
+                    s["buffer"] = b""
+                    caption = self._process_chunk(chunk, s["source"])
+                    if caption:
+                        if s["source"] == AudioSource.MICROPHONE:
+                            self._on_mic(caption)
+                        else:
+                            self._on_sys(caption)
+                except Exception as e:
+                    logger.debug("Erro no loop de captura: %s", e)
+
+        for s in streams:
+            s["stream"].close()
+        p.terminate()
+
+    def _process_chunk(self, chunk: AudioChunk, source: AudioSource) -> Caption | None:
+        segment = self._stt.transcribe(chunk)
+        text = segment.text.strip()
+        if not text:
+            return None
+        target = "pt"
+        result = self._llm.translate(text, "en", target)
+        return Caption(
+            original=text,
+            translated=result.text if not result.uncertain else text,
+            source_lang="en",
+            target_lang=target,
+            started_ns=chunk.started_ns,
+            ended_ns=chunk.ended_ns,
+        )
+
+    def _resolve_device_id(self, devices: list[dict[str, str]], fallback: int | None) -> int | None:
+        if not devices:
+            return fallback
+        return int(devices[0]["id"])
+~~~
 
 Path: src/live_caption_bridge/ui/main_window.py
 ~~~python
@@ -3543,7 +3680,7 @@ import locale
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QFormLayout, QGroupBox,
@@ -3552,9 +3689,11 @@ from PySide6.QtWidgets import (
     QTabWidget, QTextBrowser, QVBoxLayout, QWidget,
 )
 
-from live_caption_bridge.adapters.pyaudio_audio import default_device_ids, list_devices, list_output_devices
+from live_caption_bridge.domain.models import Caption
 from live_caption_bridge.infrastructure.settings import Settings
-from live_caption_bridge.ui.overlay import Overlay
+from live_caption_bridge.services.caption_engine import CaptionEngine
+from live_caption_bridge.ui.overlay import Overlay, OverlayColors, OverlayPosition
+from live_caption_bridge.adapters.pyaudio_audio import default_device_ids, list_devices, list_output_devices
 
 
 _WIN_LANG_MAP: dict[str, str] = {
@@ -3599,6 +3738,12 @@ class ConfigTab(QWidget):
         self._status_label = QLabel("Parado")
         layout.addWidget(self._status_label)
 
+    def refresh_devices(self, mics: list[str], speakers: list[str]) -> None:
+        self._mic_combo.clear()
+        self._mic_combo.addItems(mics)
+        self._speaker_combo.clear()
+        self._speaker_combo.addItems(speakers)
+
 
 class VideosTab(QWidget):
     def __init__(self) -> None:
@@ -3633,9 +3778,7 @@ class InstructionsTab(QWidget):
         <h3>Como usar</h3>
         <ol>
           <li>Na aba <b>Config</b>, selecione microfone e alto-falante.</li>
-          <li>Configure o servidor LLM (Ollama local ou remoto).</li>
-          <li>Clique em <b>Iniciar</b> para começar a captura.</li>
-          <li>A legenda aparecerá no overlay transparente.</li>
+          <li>A legenda aparecerá no overlay transparente (mic embaixo, sistema em cima).</li>
           <li>Pressione o atalho global para salvar os últimos N segundos.</li>
         </ol>""")
         layout = QVBoxLayout(self)
@@ -3649,23 +3792,58 @@ class MainWindow(QMainWindow):
         self.resize(700, 500)
 
         self._settings = Settings()
-        self._overlay = Overlay()
-        self._overlay.show()
+        self._mic_overlay = Overlay(
+            position=OverlayPosition.BOTTOM,
+            colors=OverlayColors("rgba(0, 0, 0, 160)", "white"),
+        )
+        self._sys_overlay = Overlay(
+            position=OverlayPosition.TOP,
+            colors=OverlayColors("rgba(0, 0, 80, 160)", "#aaddff"),
+        )
+        self._mic_overlay.show()
+        self._sys_overlay.show()
+
+        self._init_menu()
 
         tabs = QTabWidget()
-        tabs.addTab(ConfigTab(self._settings), "Config")
+        self._config_tab = ConfigTab(self._settings)
+        tabs.addTab(self._config_tab, "Config")
         tabs.addTab(VideosTab(), "Vídeos")
         tabs.addTab(InstructionsTab(), "Instruções")
         self.setCentralWidget(tabs)
 
         self._refresh_devices()
 
+        self._engine = CaptionEngine(
+            self._settings,
+            on_mic_caption=self._on_mic_caption,
+            on_sys_caption=self._on_sys_caption,
+        )
+        self._engine.start()
+
+    def _on_mic_caption(self, caption: Caption) -> None:
+        self._mic_overlay.display_caption(caption)
+
+    def _on_sys_caption(self, caption: Caption) -> None:
+        self._sys_overlay.display_caption(caption)
+
+    def _init_menu(self) -> None:
+        menu = self.menuBar()
+        if menu is None:
+            return
+        file_menu = menu.addMenu("&Arquivo")
+        if file_menu is None:
+            return
+        exit_action = QAction("&Sair", self)
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
     def _refresh_devices(self) -> None:
         mics = list_devices()
         speakers = list_output_devices()
         defaults = default_device_ids()
         mic_names = [d["name"] for d in mics] or ["Nenhum microfone encontrado"]
-        speaker_names = [d["name"] for d in speakers] or ["Nenhum speaker encontrado"]
+        speaker_names = [d["name"] for d in speakers] or ["Nenhum alto-falante encontrado"]
         self._config_tab.refresh_devices(mic_names, speaker_names)
         if defaults["input"] is not None:
             for i, d in enumerate(mics):
@@ -3681,7 +3859,9 @@ class MainWindow(QMainWindow):
         logger.info("Idioma detectado: origem=en, destino=%s", target)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        self._overlay.close()
+        self._engine.stop()
+        self._mic_overlay.close()
+        self._sys_overlay.close()
         event.accept()
 
 
@@ -3707,10 +3887,11 @@ def main() -> int:
     return 0
 ~~~
 
-O `main.py` agora chama `run_ui()` que abre a janela principal e o overlay. O
-overlay é frameless, translúcido e sempre no topo — visível mesmo quando a janela
-principal está minimizada. As abas organizam configuração, histórico de replays e
-instruções de uso.
+O `main.py` agora chama `run_ui()` que abre a janela principal e dois overlays.
+Overlay microfone (inferior, fundo preto) e overlay sistema (superior, fundo azul
+escuro) — visíveis mesmo quando a janela principal está minimizada. O
+`CaptionEngine` roda em background capturando áudio, transcrevendo com Vosk e
+traduzindo via LLM continuamente.
 
 Teste manualmente:
 
@@ -3718,14 +3899,14 @@ Teste manualmente:
 python -m live_caption_bridge
 ~~~
 
-Uma janela com três abas deve aparecer, e o overlay translúcido com "Teste de
-legenda" deve estar visível na tela.
+Uma janela com três abas deve aparecer, e dois overlays translúcidos devem estar
+visíveis na tela (um no topo e outro embaixo).
 
 **Checkpoint M08.** A UI permanece responsiva, falhas injetadas deixam dados válidos, captura é visível e degradação é comunicada antes da perda. Registre em **docs/lab/M08-resiliencia.md**.
 
 ~~~powershell
 python -m pytest tests -q
-python -m mypy src
+python -m mypy src --strict
 ~~~
 
 Leitura: [RegisterHotKey](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerhotkey), [Pydantic Settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/), [logging](https://docs.python.org/3/howto/logging.html) e [psutil](https://psutil.readthedocs.io/en/latest/).
