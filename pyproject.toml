@@ -4,11 +4,19 @@
     description = "Streaming project to help on translation"
     readme = "README.md"
     requires-python = ">=3.14"
+dependencies = [
+    "ollama>=0.6.2",
+    "python-dotenv>=1.2.2",
+]
 
 [dependency-groups]
     dev = [
+    "fastapi>=0.139.2",
     "pytest>=8.0",
-    ]
+]
 
 [tool.pytest.ini_options]
     testpaths = ["src/tests"]
+
+[tool.setuptools.package-dir]
+   ""= "src"

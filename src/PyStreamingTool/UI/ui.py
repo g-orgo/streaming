@@ -1,0 +1,1 @@
+""" Criar aplicativo windows com PySide6 """
