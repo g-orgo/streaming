@@ -14,7 +14,7 @@ def main():
             print("\nExiting. Goodbye!")
             break
 
-        messages.append(chat.get_response([{"role": "user", "content": user_input}])) # type: ignore
+        messages.append(chat.get_response({"role": "user", "content": user_input})) # type: ignore
         print(f"Llama: {messages[-1]}")
 
 
