@@ -1,3 +1,5 @@
+# noqa: N999
+
 from typing import Any
 
 from pytestqt.qtbot import QtBot
