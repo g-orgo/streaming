@@ -45,8 +45,13 @@ class MainWindow(QMainWindow):
 
 
 app = QApplication(sys.argv)
-window = MainWindow()
-shutdown_shortcut = QShortcut(QKeySequence("Ctrl+Q"), window)
-shutdown_shortcut.activated.connect(app.quit)
-window.show()
-sys.exit(app.exec())
+if __name__ == "__main__":
+    """ 
+        Isso impede que ao ser importado rode o aplicativo
+        sem congelar. Isso é util para testes por exemplo.
+    """
+    window = MainWindow()
+    shutdown_shortcut = QShortcut(QKeySequence("Ctrl+Q"), window)
+    shutdown_shortcut.activated.connect(app.quit)
+    window.show()
+    sys.exit(app.exec())
