@@ -1,6 +1,6 @@
 from typing import Any
 
-from pytestqt.qtbot import QtBot  # noqa: N999
+from pytestqt.qtbot import QtBot
 
 from PyStreamingTool.ui.ui import MainWindow
 
