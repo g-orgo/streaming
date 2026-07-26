@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
 
 
 app = QApplication(sys.argv)
-if __name__ == "__main__":
+def RunApp() -> None:
     """ 
         Isso impede que ao ser importado rode o aplicativo
         sem congelar. Isso é util para testes por exemplo.

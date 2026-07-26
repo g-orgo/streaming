@@ -1,11 +1,11 @@
 # from PyStreamingTool.llm.core import LlamaChat
-from PyStreamingTool.ui.ui import MainWindow
+from PyStreamingTool.ui.ui import RunApp
 
 
 def main():
 
     while True:
-        MainWindow()
+        RunApp()
 
 
 if __name__ == "__main__":
