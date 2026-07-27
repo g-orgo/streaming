@@ -2,23 +2,27 @@
 
 function App() {
     const menus_disponiveis = [{ name: "Legendas", icon: "🆎" }];
-    const [active_menu, setActiveMenu] = React.useState(null)
+    const [active_menu, setActiveMenu] = React.useState(null);
 
     return (
         <div className="flex flex-col gap-8 w-full h-full">
             <h1>Configurações de PyStreamingTool:</h1>
 
-            <div className="flex justify-between items-center h-full">
-                <div className="flex flex-col w-[100px]">
-                    {menus_disponiveis.map((item) => (
-                        <MenuItem
-                            name={item.name}
-                            icon={item.icon}
-                            onClick={() => setActiveMenu(item)}
-                        />
-                    ))}
+            <div className="flex justify-between items-center h-full min-w-[50%] w-full gap-3">
+                {menus_disponiveis.map((item) => (
+                    <MenuItem
+                        name={item.name}
+                        icon={item.icon}
+                        onClick={() => setActiveMenu(item)}
+                    />
+                ))}
+                <div className="w-full h-full rounded-xl bg-red-50 border border-red-100 p-10">
+                    {active_menu ? (
+                        <h3>{active_menu.name}</h3>
+                    ) : (
+                        <h1>"Nenhum menu selecionado"</h1>
+                    )}
                 </div>
-                <div className="w-full h-full bg-red-500">{JSON.stringify(active_menu) ?? "Nenhum menu selecionado"}</div>
             </div>
         </div>
     );
