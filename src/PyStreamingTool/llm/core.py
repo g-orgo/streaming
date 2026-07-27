@@ -7,16 +7,20 @@ from PyStreamingTool.llm.config import SYSTEM_PROMPT
 
 from .config import OLLAMA_MODEL
 
+ollama_client: Client | None = None
+
+
+def get_active_client() -> Client:
+    """Definimos com isto um client para o Ollama que não é iniciado à cada request"""
+    global ollama_client
+    if ollama_client is None:
+        ollama_client = Client()
+    return ollama_client
+
 
 class LlamaChat:
-    def __init__(self, message: Mapping[str, Any] | Message):
-        self._client = Client()
+    def __init__(self):
         self._model = OLLAMA_MODEL
-        user_msg: dict[str, Any] = (  # Ao menos message.content tem que existir
-            {"role": "user", "content": message["content"]}
-            if isinstance(message, Mapping)
-            else {"role": message.role, "content": message.content}
-        )
 
         self._messages: list[dict[str, Any]] = []  # Histórico do chat
         if SYSTEM_PROMPT:
@@ -27,8 +31,14 @@ class LlamaChat:
             """
             self._messages.append({"role": "system", "content": SYSTEM_PROMPT})
 
+    def chat(self, message: Mapping[str, Any] | Message) -> str | None:
+        user_msg: dict[str, Any] = (  # Ao menos message.content tem que existir
+            {"role": "user", "content": message["content"]}
+            if isinstance(message, Mapping)
+            else {"role": message.role, "content": message.content}
+        )
+
         self._messages.append(user_msg)  # Envia mensagem do usuário
 
-    def chat(self) -> str | None:
-        response = self._client.chat(model=self._model, messages=self._messages)  # type: ignore
+        response = get_active_client().chat(model=self._model, messages=self._messages)  # type: ignore
         return response.message.content
