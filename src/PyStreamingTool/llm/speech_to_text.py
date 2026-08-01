@@ -6,6 +6,7 @@ from typing import Protocol
 
 import numpy as np
 import sounddevice as sd  # type: ignore[import-untyped]
+from langdetect import detect  # type: ignore[import-untyped]
 from vosk import KaldiRecognizer, Model, SetLogLevel  # type: ignore[import-untyped]
 
 from PyStreamingTool.llm.core import LlamaChat
@@ -46,14 +47,27 @@ def iniciar_stt(callback: Callable[[str], None]) -> None:
         if recognizer.AcceptWaveform(indata.tobytes()):
             resultado = json.loads(recognizer.Result())
             texto = resultado.get("text", "").strip()
+            original_lang = resultado.get("lang", "")
+            language_it_should_be = (
+                "pt"
+                if original_lang != "pt"
+                else "en"  # Português por padrão mas se for em português traduzimos para inglês
+            )
+
+            print(f"Texto reconhecido: {texto}")
+
             if texto:
                 threading.Thread(
-                    target=_processar_texto, args=(texto, callback), daemon=True
+                    target=_processar_texto,
+                    args=(texto, callback, language_it_should_be),
+                    daemon=True,
                 ).start()
-        else:
-            parcial = json.loads(recognizer.PartialResult())
-            if parcial.get("partial", "").strip():
-                callback(parcial["partial"])
+        # else:
+        #     """ Este else é opcional e serve para capturar resultados parciais do reconhecimento de fala """
+        #     # todo: isso está sendo enviado sem filtro para a LLM, não está sendo traduzido.
+        #     parcial = json.loads(recognizer.PartialResult())
+        #     if parcial.get("partial", "").strip():
+        #         callback(parcial["partial"])
 
     _stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
@@ -65,11 +79,26 @@ def iniciar_stt(callback: Callable[[str], None]) -> None:
     _stream.start()
 
 
-def _processar_texto(texto: str, callback: Callable[[str], None]) -> None:
+def _processar_texto(
+    texto: str,
+    callback: Callable[[str], None],
+    language_it_should_be: str = "pt",
+) -> None:
+    """Processa o texto reconhecido pela LLM e envia o resultado para a UI através do callback"""
     try:
-        llama_client = LlamaChat()
-        resultado = llama_client.chat({"content": texto})
-        if resultado is not None:
-            callback(resultado)
+        text_gerado = LlamaChat().chat({"content": texto})
+
+        # Aqui vamos validar se o texto que será enviado à UI
+        # e que foi processado pela LLM foi traduzido. Isso é
+        # importante porque a LLM pode gerar respostas no
+        # idioma original do usuário, e queremos que a legenda seja sempre em português.
+
+        print(f"text_gerado: {text_gerado}")
+        print(f"Detected language: {detect(text_gerado)}")
+        print(f"Expected language: {language_it_should_be}")
+        print(f"Language match: {detect(text_gerado) == language_it_should_be}")
+
+        if text_gerado is not None and detect(text_gerado) == language_it_should_be:
+            callback(text_gerado)
     except (OSError, RuntimeError, ValueError) as err:
         print(err)
