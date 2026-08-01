@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from httpx2 import Response
+from httpx import Response
 
 from PyStreamingTool.api.core import app
 from PyStreamingTool.llm.core import LlamaChat

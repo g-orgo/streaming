@@ -10,7 +10,7 @@ WEB_SOCKET = socket.socket()
 
 def _find_free_port() -> int:
     WEB_SOCKET.bind(("", 0))
-    return WEB_SOCKET.getsockname()[1]
+    return int(WEB_SOCKET.getsockname()[1])
 
 
 class _HttpHandler(http.server.SimpleHTTPRequestHandler):

@@ -1,8 +1,15 @@
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import QRectF, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import (
+    QColor,
+    QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPaintEvent,
+    QShortcut,
+)
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
 
@@ -55,7 +62,15 @@ class Legendas(QWidget):
     Barra inferior do windows que apresentará legendas
     """
 
+    legenda_recebida = Signal(
+        # Signal QT, usaremos isto pois como o STT roda em uma thread dedicada,
+        # não podemos atualizar a UI diretamente de lá, então usamos signals
+        # para enviar dados entre threads
+        str
+    )
+
     def __init__(self) -> None:
+        """Definição de parâmetros"""
         super().__init__()
         self.setWindowFlags(  # Aqui definiremos algumas configurações para a janela que criaremos
             Qt.WindowFlags(  # type: ignore
@@ -76,8 +91,7 @@ class Legendas(QWidget):
 
         self.setStyleSheet(  # Define estilização CSS caso queira mudar o fundo ou a cor do texto por exemplo
             """ 
-            Legendas { background-color: rgba(0,0,0,160); border-radius: 8px;}
-            QLabel { color: #f0c960, font-size: 32px; font-weight: bold; padding: 6px 16px}
+            QLabel { color: #f0c960; font-size: 32px; font-weight: bold; padding: 6px 16px;}
             """
         )
         self._label = QLabel("Teste de legenda")
@@ -90,10 +104,25 @@ class Legendas(QWidget):
         layout = QVBoxLayout(
             self  # Criação da caixa (ou "container", "wrapper") que abrigará o restante da estrutura
         )
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)  # Define que o timer só será executado uma vez
+        self._timer.timeout.connect(
+            self._label.clear  # Define que quando o timer acabar, chamaremos a função de limpar o texto
+        )
         layout.setContentsMargins(10, 5, 10, 5)
         layout.addWidget(self._label)
         self.posicionamento()
-        iniciar_stt(callback=self.mostrar_legenda)
+
+        # Aqui definimos que quando a signal legenda_recebida for emitida, chamaremos a função mostrar_legenda
+        self.legenda_recebida.connect(self.mostrar_legenda)
+        iniciar_stt(
+            # Inicia o STT e define que quando recebermos uma legenda,
+            # emitiremos a signal legenda_recebida. Emitir sinal é thread-safe,
+            # ele só avisa o QT que algo aconteceu e o QT vai chamar a função
+            # mostrar_legenda em sua própria thread, que é a thread da UI
+            callback=self.legenda_recebida.emit
+        )
 
     def posicionamento(self) -> None:
         screen = QApplication.primaryScreen()
@@ -116,6 +145,16 @@ class Legendas(QWidget):
 
     def mostrar_legenda(self, legenda: str) -> None:
         self._label.setText(legenda)
+        self._timer.start(
+            2000
+        )  # Define que a cada 2 segundos o timer será reiniciado, ou seja, a cada 2 segundos a legenda será apagada
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), 8, 8)
+        painter.fillPath(path, QColor(0, 0, 0, 160))
 
 
 app = QApplication(sys.argv)

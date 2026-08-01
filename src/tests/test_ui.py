@@ -1,5 +1,3 @@
-# noqa: N999
-
 from typing import Any
 
 from PySide6.QtCore import QEventLoop, QTimer

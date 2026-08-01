@@ -1,10 +1,12 @@
-from PyStreamingTool.ui.ui import RunApp
+from PyStreamingTool.ui.ui import CloseApp, RunApp
 
 
-def main():
-
-    while True:
-        RunApp()
+def main() -> None:
+    try:
+        while True:
+            RunApp()
+    except KeyboardInterrupt:
+        CloseApp()
 
 
 if __name__ == "__main__":
