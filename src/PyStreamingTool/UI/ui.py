@@ -6,6 +6,8 @@ from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget
 
+from PyStreamingTool.llm.core import shutdown_active_client
+from PyStreamingTool.llm.speech_to_text import iniciar_stt
 from PyStreamingTool.ui.local_server import WEB_SOCKET, httpd, port
 
 """
@@ -25,7 +27,7 @@ class MainWindow(QMainWindow):
     configurações e consultar dados
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Definição de parâmetros"""
         super().__init__()
         self.setWindowTitle("StreamingTool")  # "Nome" do aplicativo para o OS
@@ -54,6 +56,7 @@ class Legendas(QWidget):
     """
 
     def __init__(self) -> None:
+        super().__init__()
         self.setWindowFlags(  # Aqui definiremos algumas configurações para a janela que criaremos
             Qt.WindowFlags(  # type: ignore
                 Qt.WindowType.FramelessWindowHint  # Remove os botões que ficam no topo das aplicações
@@ -90,6 +93,7 @@ class Legendas(QWidget):
         layout.setContentsMargins(10, 5, 10, 5)
         layout.addWidget(self._label)
         self.posicionamento()
+        iniciar_stt(callback=self.mostrar_legenda)
 
     def posicionamento(self) -> None:
         screen = QApplication.primaryScreen()
@@ -110,9 +114,8 @@ class Legendas(QWidget):
     def texto_atual(self) -> str:
         return self._label.text()
 
-    def mostrar_legenda(self) -> None:
-        """Aqui ainda tenho que fazer o VAT"""
-        return
+    def mostrar_legenda(self, legenda: str) -> None:
+        self._label.setText(legenda)
 
 
 app = QApplication(sys.argv)
@@ -122,17 +125,20 @@ def CloseApp() -> None:
     httpd.shutdown()
     WEB_SOCKET.close()
     app.quit()
+    shutdown_active_client()
 
 
 def RunApp() -> None:
     """
     Isso impede que ao ser importado rode o aplicativo
-    sem congelar. Isso é util para testes por exemplo.
+    sem congelar. É util para testes por exemplo.
     """
     window = MainWindow()
+    bloco_de_legendas = Legendas()
 
     shutdown_shortcut = QShortcut(QKeySequence("Ctrl+Q"), window)
     shutdown_shortcut.activated.connect(CloseApp)
 
     window.show()
+    bloco_de_legendas.show()
     sys.exit(app.exec())

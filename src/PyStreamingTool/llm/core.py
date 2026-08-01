@@ -18,8 +18,18 @@ def get_active_client() -> Client:
     return ollama_client
 
 
+def shutdown_active_client() -> None:
+    """Vou adicionar um método explicito para o encerramento da LLM junto da interface"""
+    global ollama_client
+    if ollama_client is not None:
+        try:
+            ollama_client.close()  # type: ignore[no-untyped-call]
+        finally:
+            ollama_client = None
+
+
 class LlamaChat:
-    def __init__(self):
+    def __init__(self) -> None:
         self._model = OLLAMA_MODEL
 
         self._messages: list[dict[str, Any]] = []  # Histórico do chat
@@ -40,5 +50,5 @@ class LlamaChat:
 
         self._messages.append(user_msg)  # Envia mensagem do usuário
 
-        response = get_active_client().chat(model=self._model, messages=self._messages)  # type: ignore
+        response = get_active_client().chat(model=self._model, messages=self._messages) # type: ignore
         return response.message.content

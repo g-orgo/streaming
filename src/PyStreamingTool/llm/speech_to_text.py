@@ -1,40 +1,59 @@
-import os
-from typing import Any
+import json
+import threading
+from collections.abc import Callable
+from pathlib import Path
 
-import speech_recognition as sr  # type: ignore
-import whisper  # type: ignore
+import numpy as np
+import sounddevice as sd  # type: ignore[import-untyped]
+from vosk import KaldiRecognizer, Model, SetLogLevel  # type: ignore[import-untyped]
 
-# from PyStreamingTool.api.api import chat_with_LLM
+from PyStreamingTool.llm.core import LlamaChat
 
-model: Any = whisper.load_model("turbo")
-recognizer = sr.Recognizer()
-microphone = sr.Microphone()
+SAMPLE_RATE = 16000
+BLOCK_SIZE = 8000
+MODEL_PATH = (
+    Path(__file__).parent.parent.parent.parent / "models" / "vosk-model-small-pt-0.3"
+)
+
+SetLogLevel(-1)
+model = Model(str(MODEL_PATH))
+recognizer = KaldiRecognizer(model, SAMPLE_RATE)
 
 
-def STT():
+def iniciar_stt(callback: Callable[[str], None]) -> None:
     """
-    STT (Speech to text) é bastante literal
+    Captura áudio do microfone em tempo real com sounddevice,
+    reconhece a fala com Vosk e, ao final de cada frase,
+    envia o texto reconhecido pra LLM e devolve o resultado
+    através do callback
     """
-    with microphone as source:  # Utilizando o microfone como fonte
-        recognizer.adjust_for_ambient_noise(source, duration=2)  # Supressor de ruído
-        audio_data = recognizer.listen(source)  # Escuta o microfone
 
-    """Cria um arquivo temporário com o que foi capturado"""
-    arquivo_temporario = "speech_recording.wav"
-    with open(arquivo_temporario, "wb") as speech_file:
-        speech_file.write(audio_data.get_wav_data())  # type: ignore
+    def _callback(
+        indata: np.ndarray, _frames: int, _time_info: object, _status: object
+    ) -> None:
+        if recognizer.AcceptWaveform(indata.tobytes()):  # type: ignore
+            resultado = json.loads(recognizer.Result())  # type: ignore
+            texto = resultado.get("text", "").strip()
+            if texto:
+                threading.Thread(
+                    target=_processar_texto, args=(texto, callback), daemon=True
+                ).start()
 
+    stream = sd.InputStream(
+        samplerate=SAMPLE_RATE,
+        channels=1,
+        dtype="int16",
+        blocksize=BLOCK_SIZE,
+        callback=_callback,
+    )
+    stream.start()
+
+
+def _processar_texto(texto: str, callback: Callable[[str], None]) -> None:
     try:
-        transcript = model.transcribe(arquivo_temporario)
-        texto_capturado = transcript["text"].strip()
-        # linguagem_falada = transcript["language"]
-        
+        llama_client = LlamaChat()
+        resultado = llama_client.chat({"content": texto})
+        if resultado is not None:
+            callback(resultado)
     except (OSError, RuntimeError, ValueError) as err:
         print(err)
-        texto_capturado = ""
-    finally:
-        """Indepedente de bem sucedido ao final exclua o arquivo temporário"""
-        if os.path.exists(arquivo_temporario):
-            os.remove(arquivo_temporario)
-
-    return texto_capturado

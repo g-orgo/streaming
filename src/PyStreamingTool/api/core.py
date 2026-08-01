@@ -16,7 +16,10 @@ class ChatRequest(BaseModel):
 
 @app.post(f"{prefix}/chat")
 def chat_with_LLM(body: ChatRequest) -> dict[str, Any]:
+    """
+    Envia uma mensagem para a LLM; espera user_input contendo string
+    """
     LlamaClient = LlamaChat()
-    payload = LlamaClient.chat({"role": "user", "content": body.user_input})
+    payload = LlamaClient.chat({"content": body.user_input})
     # session_history.append({"user": body.user_input, "LLM": payload})
     return {"output": payload}

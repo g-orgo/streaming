@@ -1,4 +1,3 @@
-# from PyStreamingTool.llm.core import LlamaChat
 from PyStreamingTool.ui.ui import RunApp
 
 
