@@ -199,7 +199,7 @@ def iniciar_stt(callback: Callable[[str], None]) -> None:
     """
     # O detector pré-carrega o VAD aqui (fora da thread do microfone) para o
     # modelo já estar aquecido quando os primeiros blocos chegarem,
-    # o que evita crash
+    # o que evita crash ao carregar modelos na primeira chamada do callback
     detector = _DetectorFala()
     fila_de_audio: queue.Queue[np.ndarray] = queue.Queue()
 
