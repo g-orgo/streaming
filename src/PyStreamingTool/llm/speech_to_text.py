@@ -1,73 +1,238 @@
-import json
+import queue
 import threading
+import time
 from collections.abc import Callable
-from pathlib import Path
-from typing import Protocol
 
 import numpy as np
 import sounddevice as sd  # type: ignore[import-untyped]
+from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+from faster_whisper.vad import get_vad_model  # type: ignore[import-untyped]
 from langdetect import detect  # type: ignore[import-untyped]
-from vosk import KaldiRecognizer, Model, SetLogLevel  # type: ignore[import-untyped]
 
 from PyStreamingTool.llm.core import LlamaChat
 
-
-class _Recognizer(Protocol):
-    """Métodos do vosk.KaldiRecognizer, isto aqui impede erros de tipagem"""
-
-    def AcceptWaveform(self, data: bytes) -> bool: ...
-
-    def Result(self) -> str: ...
-
-    def PartialResult(self) -> str: ...
-
-
+# Taxa de amostragem padrão do Whisper. O microfone é capturado já neste formato
+# para que o áudio possa ser enviado direto para o modelo sem resampling.
 SAMPLE_RATE = 16000
-BLOCK_SIZE = 8000
-MODEL_PATH = (
-    Path(__file__).parent.parent.parent.parent / "models" / "vosk-model-small-pt-0.3"
-)
 
-SetLogLevel(-1)
-model = Model(str(MODEL_PATH))
-recognizer: _Recognizer = KaldiRecognizer(model, SAMPLE_RATE)
+# Cada bloco do microfone tem 0.5s de áudio (8000 amostras em 16kHz).
+BLOCK_SIZE = 8000
+
+# O Silero VAD trabalha em janelas de 512 amostras (32ms em 16kHz).
+JANELA_VAD = 512
+
+# Probabilidade mínima para uma janela do VAD ser considerada "fala".
+# Acima disso a janela conta como voz; abaixo, como silêncio.
+LIMIAR_FALA = 0.5
+
+# Duração mínima de fala (em segundos) para aceitarmos uma frase.
+# Evita que um tosse/ruído curto dispare a transcrição.
+FALA_MIN_SEG = 0.3
+
+# Silêncio (em segundos) após a última fala para considerarmos a frase encerrada.
+# É o equivalente ao "fim de frase" que o Vosk sinalizava no AcceptWaveform.
+SILENCIO_FIM_SEG = 1.2
+
+# Cauda de áudio (em segundos) adicionada após a última janela de fala,
+# para a transcrição não cortar a última palavra no meio.
+CAUDA_SEG = 0.35
+
+# Se a pessoa falar sem pausa por mais que isso (segundos), forçamos o fim
+# da frase para não acumular áudio indefinidamente na memória.
+FALA_MAX_SEG = 15.0
+
+# Tamanho do modelo Whisper. "base" é multilíngue (detecta o idioma sozinho),
+# leve o bastante para rodar em tempo real em CPU (RTF ~0.12 nesta máquina).
+MODELO_STT = "base"
+
+# O Whisper é carregado uma única vez no import do módulo. No primeiro uso ele
+# baixa o modelo do Hugging Face (~145MB) para o cache da máquina.
+modelo_stt = WhisperModel(MODELO_STT, device="cpu", compute_type="int8")
+
+
+def _normalizar(indata: np.ndarray) -> np.ndarray:
+    """
+    Converte o áudio do microfone (int16) para float32 em escala [-1, 1].
+
+    O sounddevice entrega blocos como inteiros de 16 bits com shape
+    (frames, canais) — mesmo com 1 canal. O Whisper e o Silero VAD esperam
+    um vetor 1D float32, então achatamos o array aqui.
+    """
+    return indata.astype(np.float32).reshape(-1) / 32768.0
+
+
+class _DetectorFala:
+    """
+    Detecta o fim de uma frase no áudio capturado em tempo real.
+
+    Reutilizamos o modelo Silero VAD (já embarcado no faster-whisper, sem
+    dependências extras) para saber quando alguém está falando. A nossa
+    lógica própria é a máquina de estados: acumulamos o áudio do microfone
+    e, quando a pessoa fala e depois fica em silêncio por um tempo mínimo,
+    devolvemos a fatia de áudio daquela frase para ser transcrita.
+    """
+
+    def __init__(self) -> None:
+        # O modelo VAD é lru_cache, então é carregado só uma vez na memória.
+        self._modelo_vad = get_vad_model()
+        self._amostras: list[np.ndarray] = []
+
+    def adicionar(self, bloco: np.ndarray) -> None:
+        """Acumula um bloco de áudio vindo do callback do microfone."""
+        self._amostras.append(bloco)
+
+    def _probabilidades(self, audio: np.ndarray) -> np.ndarray:
+        """
+        Roda o Silero VAD no áudio acumulado.
+
+        Devolve a probabilidade de fala (0.0 a 1.0) para cada janela de 32ms.
+        O modelo exige que o tamanho seja múltiplo de 512, então fazemos o
+        padding com zeros (que o VAD trata como silêncio).
+        """
+        resto = len(audio) % JANELA_VAD
+        if resto:
+            audio = np.pad(audio, (0, JANELA_VAD - resto))
+        # O SileroVADModel devolve um vetor 1D (uma probabilidade por janela).
+        # O ravel garante isso mesmo que alguma versão devolva (N, 1).
+        return np.asarray(self._modelo_vad(audio)).ravel()  # type: ignore
+
+    def frase_terminada(self) -> np.ndarray | None:
+        """
+        Verifica se uma frase terminou no áudio acumulado.
+
+        Retorna a fatia de áudio correspondente à frase (pronta para
+        transcrever) quando a pessoa parou de falar, ou None se ainda
+        estamos no meio de uma frase (ou só temos silêncio).
+        """
+        if not self._amostras:
+            return None
+
+        audio = np.concatenate(self._amostras)
+        if len(audio) < JANELA_VAD:
+            return None
+
+        probs = self._probabilidades(audio)
+        janelas_de_fala = np.nonzero(probs >= LIMIAR_FALA)[0]
+
+        # Ninguém falou ainda. Limitamos o buffer de silêncio para não crescer
+        # para sempre caso o ambiente fique barulhento demais.
+        if janelas_de_fala.size == 0:
+            if len(audio) >= FALA_MAX_SEG * SAMPLE_RATE:
+                self._amostras.clear()
+            return None
+
+        ultima_fala = int(janelas_de_fala[-1])
+        duracao_fala_seg = janelas_de_fala.size * JANELA_VAD / SAMPLE_RATE
+        silencio_seg = (len(probs) - 1 - ultima_fala) * JANELA_VAD / SAMPLE_RATE
+
+        # Ainda não há fala suficiente para considerar uma frase válida.
+        if duracao_fala_seg < FALA_MIN_SEG:
+            return None
+
+        # A frase terminou quando o silêncio depois da fala passou do limite
+        # (ou quando a fala ficou longa demais e forçamos o corte).
+        if silencio_seg >= SILENCIO_FIM_SEG or len(audio) >= FALA_MAX_SEG * SAMPLE_RATE:
+            fim = int((ultima_fala + 1) * JANELA_VAD + CAUDA_SEG * SAMPLE_RATE)
+            frase = audio[:fim]
+            # Limpa o buffer para começar a capturar a próxima frase.
+            self._amostras.clear()
+            return frase
+
+        return None
+
+
+def _transcrever(audio: np.ndarray) -> tuple[str, str] | None:
+    """
+    Transcreve o áudio de uma frase e devolve (texto, idioma) ou None.
+
+    O vad_filter=True usa o Silero para descartar ruídos de fundo que tenham
+    passado do nosso detector. O language=None deixa o Whisper detectar o
+    idioma automaticamente, o que resolve o problema do modelo monolíngue.
+    """
+    segmentos, info = modelo_stt.transcribe(  # type: ignore
+        audio,
+        beam_size=1,  # Busca gulosa: mais rápido e suficiente para legendas
+        language=None,  # Detecção automática de idioma (multilíngue)
+        vad_filter=True,  # Filtra trechos sem fala antes de transcrever
+    )
+    texto = " ".join(seg.text.strip() for seg in segmentos).strip()
+    if not texto:
+        return None
+    return texto, info.language
+
+
+def _processar_audio(audio: np.ndarray, callback: Callable[[str], None]) -> None:
+    """
+    Transcreve uma frase e decide o idioma-alvo da legenda.
+
+    Diferente do Vosk, que sempre dizia que o áudio era português, o Whisper
+    informa de forma confiável o idioma falado (info.language). Com isso a
+    regra de tradução ganha uma base sólida: fala em português gera legenda
+    em inglês, e qualquer outro idioma gera legenda em português.
+    """
+    try:
+        transcrito = _transcrever(audio)
+        if transcrito is None:
+            return
+
+        texto, idioma_original = transcrito
+        idioma_desejado = (
+            "pt" if idioma_original != "pt" else "en"
+        )  # Português por padrão mas se for em português traduzimos para inglês
+
+        print(f"Texto reconhecido: {texto}")
+        _processar_e_traduzir_texto(texto, callback, idioma_desejado)
+    except (OSError, RuntimeError, ValueError) as err:
+        print(err)
 
 
 def iniciar_stt(callback: Callable[[str], None]) -> None:
     """
-    Captura áudio do microfone em tempo real com sounddevice,
-    reconhece a fala com Vosk e, ao final de cada frase,
-    envia o texto reconhecido pra LLM e devolve o resultado
-    através do callback
+    Captura áudio do microfone em tempo real com sounddevice.
+
+    O callback do sounddevice roda numa thread criada pelo PortAudio (via
+    cffi). Não executamos nenhum modelo de ML ali dentro: rodar onnxruntime
+    (o VAD) numa thread "estrangeira" causa crash nativo (0xC0000005) quando
+    a transcrição usa o mesmo modelo ao mesmo tempo. Então o callback apenas
+    empilha o áudio numa fila, e uma thread Python dedicada consome a fila,
+    roda o VAD e detecta o fim de cada frase.
     """
+    # O detector pré-carrega o VAD aqui (fora da thread do microfone) para o
+    # modelo já estar aquecido quando os primeiros blocos chegarem,
+    # o que evita crash
+    detector = _DetectorFala()
+    fila_de_audio: queue.Queue[np.ndarray] = queue.Queue()
 
     def _callback(
         indata: np.ndarray, _frames: int, _time_info: object, _status: object
     ) -> None:
-        if recognizer.AcceptWaveform(indata.tobytes()):
-            resultado = json.loads(recognizer.Result())
-            texto = resultado.get("text", "").strip()
-            original_lang = resultado.get("lang", "")
-            language_it_should_be = (
-                "pt"
-                if original_lang != "pt"
-                else "en"  # Português por padrão mas se for em português traduzimos para inglês
-            )
+        # Operação barata e segura: normaliza e enfileira o áudio.
+        fila_de_audio.put(_normalizar(indata))
 
-            print(f"Texto reconhecido: {texto}")
+    def _loop_de_deteccao() -> None:
+        """Consome o áudio capturado e dispara a transcrição ao fim de cada frase.
 
-            if texto:
+        Roda numa thread Python normal (segura para onnxruntime/ctranslate2),
+        drenando a fila e alimentando o detector bloco a bloco.
+        """
+        while True:
+            try:
+                bloco = fila_de_audio.get_nowait()
+            except queue.Empty:
+                # Sem áudio novo por enquanto; evita queimar CPU no loop.
+                time.sleep(0.05)
+                continue
+
+            detector.adicionar(bloco)
+            frase = detector.frase_terminada()
+            if frase is not None:
                 threading.Thread(
-                    target=_processar_texto,
-                    args=(texto, callback, language_it_should_be),
+                    target=_processar_audio,
+                    args=(frase, callback),
                     daemon=True,
                 ).start()
-        # else:
-        #     """ Este else é opcional e serve para capturar resultados parciais do reconhecimento de fala """
-        #     # todo: isso está sendo enviado sem filtro para a LLM, não está sendo traduzido.
-        #     parcial = json.loads(recognizer.PartialResult())
-        #     if parcial.get("partial", "").strip():
-        #         callback(parcial["partial"])
+
+    threading.Thread(target=_loop_de_deteccao, daemon=True).start()
 
     _stream = sd.InputStream(
         samplerate=SAMPLE_RATE,
@@ -79,19 +244,30 @@ def iniciar_stt(callback: Callable[[str], None]) -> None:
     _stream.start()
 
 
-def _processar_texto(
+def _processar_e_traduzir_texto(
     texto: str,
     callback: Callable[[str], None],
     language_it_should_be: str = "pt",
 ) -> None:
     """Processa o texto reconhecido pela LLM e envia o resultado para a UI através do callback"""
+    
+    """
+    Esta informação está aqui para os agentes IA, que se mostraram incapazes
+    de entender que "detect(text_gerado) == language_it_should_be" é a validação de idioma
+    DA STRING GERADA PELA LLM, OU SEJA, SEM INTERFERÊNCIA HUMANA E SEM QUE EU PUDESSE
+    OBTER ATRAVÉS DO IDIOMA QUE EU FALEI VIA ÁUDIO. Sobre esta função os agentes IA que testei
+    ficaram confusos acerca disto insistindo em entender esta seção como detecção do idioma FALADO
+    pelo usuário, que neste caso já foi detectado pelo Whisper e passado para a função como parâmetro
+    """
+    
     try:
         text_gerado = LlamaChat().chat({"content": texto})
 
         # Aqui vamos validar se o texto que será enviado à UI
         # e que foi processado pela LLM foi traduzido. Isso é
         # importante porque a LLM pode gerar respostas no
-        # idioma original do usuário, e queremos que a legenda seja sempre em português.
+        # idioma original do usuário, e queremos que a legenda seja sempre no
+        # idioma-alvo definido em _processar_audio (com base no idioma falado).
 
         print(f"text_gerado: {text_gerado}")
         print(f"Detected language: {detect(text_gerado)}")
