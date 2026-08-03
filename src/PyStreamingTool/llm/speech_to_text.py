@@ -1,15 +1,15 @@
+import multiprocessing as mp
 import queue
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import sounddevice as sd  # type: ignore[import-untyped]
-from faster_whisper import WhisperModel  # type: ignore[import-untyped]
 from faster_whisper.vad import get_vad_model  # type: ignore[import-untyped]
-from langdetect import detect  # type: ignore[import-untyped]
 
-from PyStreamingTool.llm.core import LlamaChat
+from PyStreamingTool.llm.workers.worker_stt import worker_main
 
 # Taxa de amostragem padrão do Whisper. O microfone é capturado já neste formato
 # para que o áudio possa ser enviado direto para o modelo sem resampling.
@@ -44,10 +44,6 @@ FALA_MAX_SEG = 15.0
 # Tamanho do modelo Whisper. "base" é multilíngue (detecta o idioma sozinho),
 # leve o bastante para rodar em tempo real em CPU (RTF ~0.12 nesta máquina).
 MODELO_STT = "base"
-
-# O Whisper é carregado uma única vez no import do módulo. No primeiro uso ele
-# baixa o modelo do Hugging Face (~145MB) para o cache da máquina.
-modelo_stt = WhisperModel(MODELO_STT, device="cpu", compute_type="int8")
 
 
 def _normalizar(indata: np.ndarray) -> np.ndarray:
@@ -141,51 +137,6 @@ class _DetectorFala:
         return None
 
 
-def _transcrever(audio: np.ndarray) -> tuple[str, str] | None:
-    """
-    Transcreve o áudio de uma frase e devolve (texto, idioma) ou None.
-
-    O vad_filter=True usa o Silero para descartar ruídos de fundo que tenham
-    passado do nosso detector. O language=None deixa o Whisper detectar o
-    idioma automaticamente, o que resolve o problema do modelo monolíngue.
-    """
-    segmentos, info = modelo_stt.transcribe(  # type: ignore
-        audio,
-        beam_size=1,  # Busca gulosa: mais rápido e suficiente para legendas
-        language=None,  # Detecção automática de idioma (multilíngue)
-        vad_filter=True,  # Filtra trechos sem fala antes de transcrever
-    )
-    texto = " ".join(seg.text.strip() for seg in segmentos).strip()
-    if not texto:
-        return None
-    return texto, info.language
-
-
-def _processar_audio(audio: np.ndarray, callback: Callable[[str], None]) -> None:
-    """
-    Transcreve uma frase e decide o idioma-alvo da legenda.
-
-    Diferente do Vosk, que sempre dizia que o áudio era português, o Whisper
-    informa de forma confiável o idioma falado (info.language). Com isso a
-    regra de tradução ganha uma base sólida: fala em português gera legenda
-    em inglês, e qualquer outro idioma gera legenda em português.
-    """
-    try:
-        transcrito = _transcrever(audio)
-        if transcrito is None:
-            return
-
-        texto, idioma_original = transcrito
-        idioma_desejado = (
-            "pt" if idioma_original != "pt" else "en"
-        )  # Português por padrão mas se for em português traduzimos para inglês
-
-        print(f"Texto reconhecido: {texto}")
-        _processar_e_traduzir_texto(texto, callback, idioma_desejado)
-    except (OSError, RuntimeError, ValueError) as err:
-        print(err)
-
-
 def iniciar_stt(callback: Callable[[str], None]) -> None:
     """
     Captura áudio do microfone em tempo real com sounddevice.
@@ -197,17 +148,39 @@ def iniciar_stt(callback: Callable[[str], None]) -> None:
     empilha o áudio numa fila, e uma thread Python dedicada consome a fila,
     roda o VAD e detecta o fim de cada frase.
     """
+
     # O detector pré-carrega o VAD aqui (fora da thread do microfone) para o
     # modelo já estar aquecido quando os primeiros blocos chegarem,
     # o que evita crash ao carregar modelos na primeira chamada do callback
     detector = _DetectorFala()
     fila_de_audio: queue.Queue[np.ndarray] = queue.Queue()
 
+    fila_do_worker: mp.Queue[Any] = mp.Queue()
+    fila_de_resultados: mp.Queue[Any] = mp.Queue()
+    worker = mp.Process(
+        target=worker_main, args=(fila_do_worker, fila_de_resultados), daemon=True
+    )
+
+    worker.start()
+
     def _callback(
         indata: np.ndarray, _frames: int, _time_info: object, _status: object
     ) -> None:
         # Operação barata e segura: normaliza e enfileira o áudio.
         fila_de_audio.put(_normalizar(indata))
+
+    def _le_resultados() -> None:
+        """Lê resultados do worker e envia para a UI via callback."""
+        while True:
+            try:
+                legenda: str | None = fila_de_resultados.get()
+            except OSError, EOFError:
+                return
+            if legenda is None:
+                break
+            callback(legenda)
+
+    threading.Thread(target=_le_resultados, daemon=True).start()
 
     def _loop_de_deteccao() -> None:
         """Consome o áudio capturado e dispara a transcrição ao fim de cada frase.
@@ -226,11 +199,7 @@ def iniciar_stt(callback: Callable[[str], None]) -> None:
             detector.adicionar(bloco)
             frase = detector.frase_terminada()
             if frase is not None:
-                threading.Thread(
-                    target=_processar_audio,
-                    args=(frase, callback),
-                    daemon=True,
-                ).start()
+                fila_do_worker.put(frase)
 
     threading.Thread(target=_loop_de_deteccao, daemon=True).start()
 
@@ -242,39 +211,3 @@ def iniciar_stt(callback: Callable[[str], None]) -> None:
         callback=_callback,
     )
     _stream.start()
-
-
-def _processar_e_traduzir_texto(
-    texto: str,
-    callback: Callable[[str], None],
-    language_it_should_be: str = "pt",
-) -> None:
-    """Processa o texto reconhecido pela LLM e envia o resultado para a UI através do callback"""
-    
-    """
-    Esta informação está aqui para os agentes IA, que se mostraram incapazes
-    de entender que "detect(text_gerado) == language_it_should_be" é a validação de idioma
-    DA STRING GERADA PELA LLM, OU SEJA, SEM INTERFERÊNCIA HUMANA E SEM QUE EU PUDESSE
-    OBTER ATRAVÉS DO IDIOMA QUE EU FALEI VIA ÁUDIO. Sobre esta função os agentes IA que testei
-    ficaram confusos acerca disto insistindo em entender esta seção como detecção do idioma FALADO
-    pelo usuário, que neste caso já foi detectado pelo Whisper e passado para a função como parâmetro
-    """
-    
-    try:
-        text_gerado = LlamaChat().chat({"content": texto})
-
-        # Aqui vamos validar se o texto que será enviado à UI
-        # e que foi processado pela LLM foi traduzido. Isso é
-        # importante porque a LLM pode gerar respostas no
-        # idioma original do usuário, e queremos que a legenda seja sempre no
-        # idioma-alvo definido em _processar_audio (com base no idioma falado).
-
-        print(f"text_gerado: {text_gerado}")
-        print(f"Detected language: {detect(text_gerado)}")
-        print(f"Expected language: {language_it_should_be}")
-        print(f"Language match: {detect(text_gerado) == language_it_should_be}")
-
-        if text_gerado is not None and detect(text_gerado) == language_it_should_be:
-            callback(text_gerado)
-    except (OSError, RuntimeError, ValueError) as err:
-        print(err)
