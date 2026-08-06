@@ -50,5 +50,9 @@ class LlamaChat:
 
         self._messages.append(user_msg)  # Envia mensagem do usuário
 
-        response = get_active_client().chat(model=self._model, messages=self._messages)
+        response = get_active_client().chat(  # type: ignore
+            model=self._model,
+            messages=self._messages,
+            options={"temperature": 0.0, "num_predict": 200},
+        )
         return response.message.content

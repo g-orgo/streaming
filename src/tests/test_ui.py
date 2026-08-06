@@ -33,7 +33,7 @@ def test_if_it_has_app_div(qtbot: QtBot) -> None:
     with qtbot.waitSignal(main_window.browser.loadFinished, timeout=10000) as result:
         pass  # Aguarda a página carregar
 
-    assert result.args[0] is True  # type:ignore
+    assert result.args[0] is True
     """ Ou seja, carregou. """
 
     html_elements: list[Any] = []

@@ -9,7 +9,7 @@ import numpy as np
 import sounddevice as sd  # type: ignore[import-untyped]
 from faster_whisper.vad import get_vad_model  # type: ignore[import-untyped]
 
-from PyStreamingTool.llm.workers.worker_stt import worker_main
+from PyStreamingTool.llm.workers.stt import worker_main
 
 # Taxa de amostragem padrão do Whisper. O microfone é capturado já neste formato
 # para que o áudio possa ser enviado direto para o modelo sem resampling.
@@ -23,7 +23,7 @@ JANELA_VAD = 512
 
 # Probabilidade mínima para uma janela do VAD ser considerada "fala".
 # Acima disso a janela conta como voz; abaixo, como silêncio.
-LIMIAR_FALA = 0.5
+LIMIAR_FALA = 0.35 # Sensibilidade do microfone é aqui
 
 # Duração mínima de fala (em segundos) para aceitarmos uma frase.
 # Evita que um tosse/ruído curto dispare a transcrição.
@@ -31,7 +31,7 @@ FALA_MIN_SEG = 0.3
 
 # Silêncio (em segundos) após a última fala para considerarmos a frase encerrada.
 # É o equivalente ao "fim de frase" que o Vosk sinalizava no AcceptWaveform.
-SILENCIO_FIM_SEG = 1.2
+SILENCIO_FIM_SEG = 0.8
 
 # Cauda de áudio (em segundos) adicionada após a última janela de fala,
 # para a transcrição não cortar a última palavra no meio.
@@ -90,7 +90,7 @@ class _DetectorFala:
             audio = np.pad(audio, (0, JANELA_VAD - resto))
         # O SileroVADModel devolve um vetor 1D (uma probabilidade por janela).
         # O ravel garante isso mesmo que alguma versão devolva (N, 1).
-        return np.asarray(self._modelo_vad(audio)).ravel()  # type: ignore
+        return np.asarray(self._modelo_vad(audio)).ravel() # type: ignore
 
     def frase_terminada(self) -> np.ndarray | None:
         """
@@ -174,10 +174,10 @@ def iniciar_stt(callback: Callable[[str], None]) -> None:
         while True:
             try:
                 legenda: str | None = fila_de_resultados.get()
-            except OSError, EOFError:
+            except (OSError, EOFError):
                 return
             if legenda is None:
-                break
+                continue
             callback(legenda)
 
     threading.Thread(target=_le_resultados, daemon=True).start()

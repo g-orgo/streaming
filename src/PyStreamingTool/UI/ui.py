@@ -94,7 +94,7 @@ class Legendas(QWidget):
             QLabel { color: #f0c960; font-size: 32px; font-weight: bold; padding: 6px 16px;}
             """
         )
-        self._label = QLabel("Teste de legenda")
+        self._label = QLabel("")
         self._label.setWordWrap(
             True  # Textos devem quebrar para novas linhas quando atingirem o máximo do container automaticamente
         )
