@@ -5,7 +5,7 @@ from ollama import Client, Message
 
 from PyStreamingTool.llm.config import SYSTEM_PROMPT
 
-from .config import OLLAMA_MODEL
+from .config import OLLAMA_EMBED_MODEL, OLLAMA_KEEP_ALIVE, OLLAMA_MODEL
 
 ollama_client: Client | None = None
 
@@ -50,9 +50,33 @@ class LlamaChat:
 
         self._messages.append(user_msg)  # Envia mensagem do usuário
 
-        response = get_active_client().chat(  # type: ignore
+        response = get_active_client().chat(
             model=self._model,
             messages=self._messages,
+            # Mantém o modelo carregado na memória do Ollama por 30min. Sem
+            # isso ele descarrega após ~5min ocioso e cada primeira frase
+            # paga ~5s de load_duration (medido).
+            keep_alive=OLLAMA_KEEP_ALIVE,
             options={"temperature": 0.0, "num_predict": 200},
         )
         return response.message.content
+
+
+def get_embeddings(textos: list[str]) -> list[list[float]] | None:
+    """Embeddings multilíngues para comparação semântica, via Ollama.
+
+    Devolve None se o modelo de embedding não estiver configurado ou se a
+    chamada falhar; nesse caso o guard do worker interpreta como "sem
+    verificação" e não bloqueia a legenda.
+    """
+    if not OLLAMA_EMBED_MODEL:
+        return None
+    try:
+        resp = get_active_client().embed(
+            model=OLLAMA_EMBED_MODEL,
+            input=textos,
+            keep_alive=OLLAMA_KEEP_ALIVE,
+        )
+        return [list(e) for e in resp.embeddings]
+    except (OSError, RuntimeError, ValueError):
+        return None
